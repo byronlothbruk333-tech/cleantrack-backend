@@ -1,0 +1,21 @@
+$kind: http-request
+name: "{{baseUrl}}/api/auth/login"
+description: ""
+url: "{{baseUrl}}/api/auth/register"
+method: POST
+body:
+  type: json
+  content: "{\r
+
+    \    \"name\":\"Byron Lothbrok\",\r
+
+    \"email\":\"byron.robin@cleantrack.local\",\r
+
+    \"password\":\"newpass123\",\r
+
+    \"role\":\"admin\"\r
+
+    }"
+auth:
+  type: noauth
+order: 1789740899977

@@ -1,0 +1,10 @@
+$kind: http-request
+name: "{{baseUrl}}/api/kpis/routes"
+description: ""
+url: "{{baseUrl}}/api/kpis/routes"
+method: GET
+auth:
+  type: bearer
+  credentials:
+    token: "{{adminToken}}"
+order: 4501697268488977

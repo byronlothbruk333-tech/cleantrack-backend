@@ -1,0 +1,10 @@
+$kind: http-request
+name: "{{baseUrl}}/api/kpis/fleet"
+description: ""
+url: "{{baseUrl}}/api/kpis/fleet"
+method: GET
+auth:
+  type: bearer
+  credentials:
+    token: "{{adminToken}}"
+order: 4499390228684818

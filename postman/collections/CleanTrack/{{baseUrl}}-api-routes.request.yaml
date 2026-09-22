@@ -1,0 +1,31 @@
+$kind: http-request
+name: "\t{{baseUrl}}/api/routes"
+description: ""
+url: "{{baseUrl}}/api/upload/multiple"
+method: POST
+body:
+  type: formdata
+  content:
+    - type: file
+      key: files
+      src:
+        - postman-cloud:///1f1b5ba5-8fff-4530-9242-38470a8e122d
+      description: ""
+      disabled: false
+    - type: file
+      key: files
+      src:
+        - postman-cloud:///1f1b5ba2-81f2-43f0-8086-bbf680b95666
+      description: ""
+      disabled: false
+    - type: file
+      key: files
+      src:
+        - postman-cloud:///1f1b5ba3-12f1-4630-aac2-8844cc34fdc0
+      description: ""
+      disabled: false
+auth:
+  type: bearer
+  credentials:
+    token: "{{json_web_token_0qof}}"
+order: 4503583170831883

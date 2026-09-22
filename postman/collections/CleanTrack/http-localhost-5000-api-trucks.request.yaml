@@ -1,0 +1,10 @@
+$kind: http-request
+name: http://localhost:5000/api/trucks
+description: ""
+url: http://localhost:5000/api/trucks
+method: GET
+auth:
+  type: bearer
+  credentials:
+    token: "{{json_web_token_0l65}}"
+order: 4503587821473934

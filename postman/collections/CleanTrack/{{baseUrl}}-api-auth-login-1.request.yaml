@@ -1,0 +1,15 @@
+$kind: http-request
+name: "\t{{baseUrl}}/api/auth/login"
+description: ""
+url: "\t{{baseUrl}}/api/auth/login"
+method: POST
+body:
+  type: json
+  content: "{\r
+
+    \  \"email\": \"byron.robin@cleantrack.local\",\r
+
+    \  \"password\": \"newpass456\"\r
+
+    }"
+order: 4480811021674790

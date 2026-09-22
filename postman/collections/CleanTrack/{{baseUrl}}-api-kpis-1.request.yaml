@@ -1,0 +1,13 @@
+$kind: http-request
+name: "{{baseUrl}}/api/kpis"
+description: ""
+url: "{{baseUrl}}/api/reports/{{reportId}}/comments/6546d979-cf78-486a-b45f-9efcfd61aa43"
+method: DELETE
+body:
+  type: json
+  content: ""
+auth:
+  type: bearer
+  credentials:
+    token: "{{adminToken}}"
+order: 4503582470639950

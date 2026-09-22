@@ -1,0 +1,23 @@
+$kind: http-request
+name: "{{baseUrl}}/api/trucks/{{truckId}}/status"
+description: ""
+url: "{{baseUrl}}/api/trucks/{{truckId}}/status"
+method: PATCH
+body:
+  type: json
+  content: "{\r
+
+    \  \"status\": \"on-route\",\r
+
+    \  \"completion\": 25,\r
+
+    \  \"latitude\": -9.4500,\r
+
+    \  \"longitude\": 147.1900\r
+
+    }"
+auth:
+  type: bearer
+  credentials:
+    token: "{{driverToken}}"
+order: 4474701714406808

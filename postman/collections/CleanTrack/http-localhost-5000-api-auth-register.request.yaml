@@ -1,0 +1,19 @@
+$kind: http-request
+name: http://localhost:5000/api/auth/register
+description: ""
+url: http://localhost:5000/api/auth/register
+method: POST
+body:
+  type: json
+  content: "{\r
+
+    \  \"name\": \"Test Citizen\",\r
+
+    \  \"email\": \"citizen3@cleantrack.local\",\r
+
+    \  \"password\": \"citizenpass789\",\r
+
+    \  \"role\": \"citizen\"\r
+
+    }"
+order: 1812027646648703

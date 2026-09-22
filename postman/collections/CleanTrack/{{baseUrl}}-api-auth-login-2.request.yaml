@@ -1,0 +1,9 @@
+$kind: http-request
+name: "{{baseUrl}}/api/auth/login"
+description: ""
+url: "{{baseUrl}}/api/auth/login"
+method: POST
+body:
+  type: json
+  content: '{"email": "citizen@cleantrack.local", "password": "citizenpass123"}'
+order: 4503330483507766

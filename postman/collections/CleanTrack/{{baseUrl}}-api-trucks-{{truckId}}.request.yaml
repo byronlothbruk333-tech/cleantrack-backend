@@ -1,0 +1,10 @@
+$kind: http-request
+name: "{{baseUrl}}/api/trucks/{{truckId}}"
+description: ""
+url: "{{baseUrl}}/api/trucks/{{truckId}}/status"
+method: GET
+auth:
+  type: bearer
+  credentials:
+    token: "{{driverToken}}"
+order: 4227956112145879

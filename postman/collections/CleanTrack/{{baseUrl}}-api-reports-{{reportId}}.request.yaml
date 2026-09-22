@@ -1,0 +1,6 @@
+$kind: http-request
+name: "{{baseUrl}}/api/reports/{{reportId}}"
+description: ""
+url: "{{baseUrl}}/api/reports/{{reportId}}"
+method: GET
+order: 2994659178244313

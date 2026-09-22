@@ -1,0 +1,13 @@
+$kind: http-request
+name: "{{baseUrl}}/api/reports/{{reportId}}/status"
+description: ""
+url: "{{baseUrl}}/api/reports/{{reportId}}/status"
+method: PATCH
+body:
+  type: json
+  content: '{"status": "resolved"}'
+auth:
+  type: bearer
+  credentials:
+    token: "{{json_web_token_0t2e}}"
+order: 759900806722727

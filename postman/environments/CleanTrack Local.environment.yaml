@@ -1,0 +1,22 @@
+name: CleanTrack Local
+values:
+  - key: baseUrl
+    value: ''
+  - key: reportId
+    value: ''
+  - key: truckId
+    value: ''
+  - key: driverToken
+    secret: true
+  - key: adminToken
+    secret: true
+  - key: citizenToken
+    secret: true
+  - key: routeId
+    value: ''
+  - key: stop1
+    value: ''
+  - key: stop2
+    value: ''
+  - key: stop3
+    value: ''

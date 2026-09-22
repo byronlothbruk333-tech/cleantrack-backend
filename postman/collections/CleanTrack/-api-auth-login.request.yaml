@@ -1,0 +1,9 @@
+$kind: http-request
+name: /api/auth/login
+description: ""
+url: "{{baseUrl}}/api/auth/login"
+method: POST
+body:
+  type: json
+  content: '{"email":  "driver1@cleantrack.local", "password": "driverpass123"}'
+order: 4072625238617944

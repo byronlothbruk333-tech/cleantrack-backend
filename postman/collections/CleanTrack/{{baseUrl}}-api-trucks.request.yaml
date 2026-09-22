@@ -1,0 +1,31 @@
+$kind: http-request
+name: "{{baseUrl}}/api/trucks"
+description: ""
+url: "{{baseUrl}}/api/trucks"
+method: POST
+body:
+  type: json
+  content: "{\r
+
+    \  \"truckId\": \"T-002\",\r
+
+    \  \"registrationNumber\": \"DEF-456\",\r
+
+    \  \"driverId\": \"ce6b50a5-758f-4736-b331-e93717d6153e\",\r
+
+    \  \"zone\": \"Zone B\",\r
+
+    \  \"status\": \"on-route\",\r
+
+    \  \"capacity\": 120,\r
+
+    \  \"lastMaintenance\": \"2026-08-05\",\r
+
+    \  \"nextMaintenance\": \"2026-11-05\"\r
+
+    }"
+auth:
+  type: bearer
+  credentials:
+    token: "{{adminToken}}"
+order: 4072650770256928
