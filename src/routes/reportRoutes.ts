@@ -13,43 +13,35 @@ import {
   getReportComments,
   addReportComment,
   deleteReportComment,
+  assignTruckToComplaint, // ADDED
 } from '../controllers/reportController';
 import { authenticate, authorize } from '../middleware/auth';
 import { UserRole } from '../models/User';
 
 const router = Router();
 
-// ============================================
-// ALL REPORT ROUTES REQUIRE AUTHENTICATION
-// ============================================
 router.use(authenticate);
 
 // ============================================
-// SPECIFIC ROUTES FIRST (before /:id)
+// SPECIFIC ROUTES (must be before /:id)
 // ============================================
-
-// GET /api/reports/counts — admin: status counts
 router.get(
   '/counts',
   authorize(UserRole.ADMIN, UserRole.MANAGEMENT),
   getReportCounts
 );
 
-// GET /api/reports/by-citizen/:citizenId — admin: reports from a citizen
 router.get(
   '/by-citizen/:citizenId',
   authorize(UserRole.ADMIN, UserRole.MANAGEMENT),
   getReportsByCitizen
 );
 
-// GET /api/reports/stats — citizen: their own stats
 router.get('/stats', getReportStats);
-
-// GET /api/reports/my — citizen: their own reports
 router.get('/my', getMyReports);
 
 // ============================================
-// GENERAL LISTING (admin/driver)
+// GENERAL LISTING
 // ============================================
 router.get(
   '/',
@@ -76,6 +68,15 @@ router.patch(
   '/:id/status',
   authorize(UserRole.ADMIN, UserRole.MANAGEMENT),
   updateReportStatus
+);
+
+// ============================================
+// ASSIGN TRUCK TO COMPLAINT (NEW)
+// ============================================
+router.post(
+  '/:id/assign-truck',
+  authorize(UserRole.ADMIN, UserRole.MANAGEMENT),
+  assignTruckToComplaint
 );
 
 // ============================================

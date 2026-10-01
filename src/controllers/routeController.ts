@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { Op } from 'sequelize';
 import Route, { RouteStatus } from '../models/Route';
 import RouteStop, { StopStatus, ComplaintType } from '../models/RouteStop';
-import Truck from '../models/Truck';
+import Truck, { TruckStatus } from '../models/Truck';
 import Report from '../models/Report';
 import User from '../models/User';
 import { AuthRequest } from '../middleware/auth';
@@ -13,7 +13,24 @@ import {
   isSuburbInZone,
   isWithinPortMoresby,
   getZoneForSuburb,
+  isWorkingDayForZone,
+  getWorkingDaysForZone,
 } from '../constants/portMoresbyZones';
+
+// ============================================
+// HELPER: Default Route Times (8:00 AM - 4:00 PM)
+// ============================================
+const getDefaultRouteTimes = (dateString: string) => {
+  const date = new Date(dateString);
+
+  const start = new Date(date);
+  start.setHours(8, 0, 0, 0);
+
+  const end = new Date(date);
+  end.setHours(16, 0, 0, 0);
+
+  return { defaultStart: start, defaultEnd: end };
+};
 
 // ============================================
 // HELPER: Validate a stop's location and suburb
@@ -23,6 +40,10 @@ const validateStopData = (
   latitude: number,
   longitude: number
 ): { valid: boolean; message?: string } => {
+  if (isNaN(latitude) || isNaN(longitude)) {
+    return { valid: false, message: 'Latitude and longitude must be valid numbers' };
+  }
+
   if (!isWithinPortMoresby(latitude, longitude)) {
     return {
       valid: false,
@@ -42,9 +63,77 @@ const validateStopData = (
 };
 
 // ============================================
+// HELPER: Standard error response
+// ============================================
+const handleError = (res: Response, error: any, fallbackMessage: string) => {
+  console.error(fallbackMessage, error);
+  res.status(500).json({
+    error: fallbackMessage,
+    message:
+      process.env.NODE_ENV === 'development'
+        ? error.message
+        : 'Something went wrong',
+  });
+};
+
+// ============================================
+// HELPER: Update truck status based on route progress
+// ============================================
+const updateTruckStatusFromRoute = async (
+  routeId: string,
+  completedCount: number,
+  handledCount: number
+) => {
+  try {
+    const route = await Route.findByPk(routeId);
+    if (!route) {
+      console.log(`⚠️ No route found with ID ${routeId}`);
+      return;
+    }
+
+    const truck = await Truck.findByPk(route.truckId);
+    if (!truck) {
+      console.log(`⚠️ No truck found for route ${routeId} (truckId: ${route.truckId})`);
+      return;
+    }
+
+    const totalStops = route.totalStops || 0;
+
+    truck.completion =
+      totalStops > 0 ? Math.round((completedCount / totalStops) * 100) : 0;
+
+    const allStopsHandled = handledCount >= totalStops;
+
+    const currentStatus = String(truck.status).toLowerCase();
+    const canAutoUpdate =
+      currentStatus === 'available' || currentStatus === 'on-route';
+
+    console.log(
+      `🚛 Truck ${truck.truckId}: status="${currentStatus}", completion=${truck.completion}%, handled=${handledCount}/${totalStops}`
+    );
+
+    if (canAutoUpdate) {
+      if (allStopsHandled) {
+        truck.status = 'available' as TruckStatus;
+        console.log(`✅ Set ${truck.truckId} → AVAILABLE (all stops handled)`);
+      } else if (handledCount > 0) {
+        truck.status = 'on-route' as TruckStatus;
+        console.log(`✅ Set ${truck.truckId} → ON_ROUTE`);
+      }
+    } else {
+      console.log(
+        `⏸️ Skipped auto-update for ${truck.truckId} (status is ${currentStatus}, preserved)`
+      );
+    }
+
+    await truck.save();
+  } catch (error: any) {
+    console.error('Error updating truck status:', error);
+  }
+};
+
+// ============================================
 // CREATE ROUTE
-// POST /api/routes
-// Requires: admin/management
 // ============================================
 export const createRoute = async (req: AuthRequest, res: Response) => {
   try {
@@ -57,16 +146,13 @@ export const createRoute = async (req: AuthRequest, res: Response) => {
       scheduledEnd,
       estimatedDuration,
       notes,
-      stops, // Array of stop objects
+      stops,
     } = req.body;
 
-    // ============================================
-    // VALIDATION
-    // ============================================
-    if (!truckId || !zone || !suburb || !scheduledDate || !scheduledStart || !scheduledEnd) {
+    if (!truckId || !zone || !suburb || !scheduledDate) {
       return res.status(400).json({
         error: 'Missing required fields',
-        message: 'truckId, zone, suburb, scheduledDate, scheduledStart, and scheduledEnd are required',
+        message: 'truckId, zone, suburb, and scheduledDate are required',
       });
     }
 
@@ -80,11 +166,26 @@ export const createRoute = async (req: AuthRequest, res: Response) => {
     if (!isSuburbInZone(suburb, zone as ZoneName)) {
       return res.status(400).json({
         error: 'Invalid suburb',
-        message: `"${suburb}" is not in ${zone}. Valid suburbs: ${ZONES[zone as ZoneName].suburbs.join(', ')}`,
+        message: `"${suburb}" is not in ${zone}. Valid suburbs: ${ZONES[
+          zone as ZoneName
+        ].suburbs.join(', ')}`,
       });
     }
 
-    // Validate truck exists
+    // ✅ VALIDATE: Check if scheduled date is a collection day for the zone
+    const scheduledDateObj = new Date(scheduledDate);
+
+    if (!isWorkingDayForZone(scheduledDateObj, zone)) {
+      const dayName = scheduledDateObj.toLocaleDateString('en-US', {
+        weekday: 'long',
+      });
+      const workingDays = getWorkingDaysForZone(zone);
+      return res.status(400).json({
+        error: 'Not a collection day',
+        message: `${zone} does not collect on ${dayName}s. Collection days: ${workingDays.join(', ')}`,
+      });
+    }
+
     const truck = await Truck.findByPk(truckId);
     if (!truck) {
       return res.status(404).json({
@@ -93,11 +194,24 @@ export const createRoute = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Validate stops if provided
+    const { defaultStart, defaultEnd } = getDefaultRouteTimes(scheduledDate);
+
+    const finalStart = scheduledStart ? new Date(scheduledStart) : defaultStart;
+    const finalEnd = scheduledEnd ? new Date(scheduledEnd) : defaultEnd;
+
+    const finalDuration =
+      estimatedDuration ||
+      Math.round((finalEnd.getTime() - finalStart.getTime()) / (1000 * 60));
+
     if (stops && Array.isArray(stops)) {
       for (let i = 0; i < stops.length; i++) {
         const stop = stops[i];
-        if (!stop.address || !stop.suburb || stop.latitude === undefined || stop.longitude === undefined) {
+        if (
+          !stop.address ||
+          !stop.suburb ||
+          stop.latitude === undefined ||
+          stop.longitude === undefined
+        ) {
           return res.status(400).json({
             error: `Stop ${i + 1} missing fields`,
             message: 'Each stop requires address, suburb, latitude, and longitude',
@@ -118,26 +232,20 @@ export const createRoute = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // ============================================
-    // CREATE ROUTE
-    // ============================================
     const route = await Route.create({
       truckId,
       zone,
       suburb,
       scheduledDate: new Date(scheduledDate),
-      scheduledStart: new Date(scheduledStart),
-      scheduledEnd: new Date(scheduledEnd),
-      estimatedDuration: estimatedDuration || 480,
+      scheduledStart: finalStart,
+      scheduledEnd: finalEnd,
+      estimatedDuration: finalDuration,
       status: RouteStatus.PENDING,
       totalStops: stops ? stops.length : 0,
       completedStops: 0,
       notes: notes || null,
     });
 
-    // ============================================
-    // CREATE STOPS (if provided)
-    // ============================================
     if (stops && Array.isArray(stops) && stops.length > 0) {
       const stopRecords = stops.map((stop: any, index: number) => ({
         routeId: route.id,
@@ -156,7 +264,6 @@ export const createRoute = async (req: AuthRequest, res: Response) => {
       await RouteStop.bulkCreate(stopRecords);
     }
 
-    // Reload route with stops
     const fullRoute = await Route.findByPk(route.id, {
       include: [
         {
@@ -178,18 +285,12 @@ export const createRoute = async (req: AuthRequest, res: Response) => {
       route: fullRoute,
     });
   } catch (error: any) {
-    console.error('Create route error:', error);
-    res.status(500).json({
-      error: 'Failed to create route',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
-    });
+    handleError(res, error, 'Failed to create route');
   }
 };
 
 // ============================================
 // GET TODAY'S ROUTE (for driver)
-// GET /api/routes/today
-// Requires: driver
 // ============================================
 export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
   try {
@@ -197,7 +298,6 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
       return res.status(401).json({ error: 'Not authenticated' });
     }
 
-    // Find the truck assigned to this driver
     const truck = await Truck.findOne({
       where: { driverId: req.user.id },
     });
@@ -209,13 +309,21 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Get today's date range (start of day to end of day)
     const today = new Date();
+
+    if (!isWorkingDayForZone(today, truck.zone)) {
+      const dayName = today.toLocaleDateString('en-US', { weekday: 'long' });
+      const workingDays = getWorkingDaysForZone(truck.zone);
+      return res.status(404).json({
+        error: 'Not a collection day',
+        message: `${truck.zone} does not collect on ${dayName}s. Collection days: ${workingDays.join(', ')}`,
+      });
+    }
+
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
-    // Find today's route for this truck
     const route = await Route.findOne({
       where: {
         truckId: truck.id,
@@ -228,6 +336,82 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
         {
           model: Truck,
           as: 'truck',
+          include: [{ model: User, as: 'driver', attributes: ['id', 'name', 'email'] }],
+        },
+        {
+          model: RouteStop,
+          as: 'stops',
+          separate: true,
+          order: [['sequence', 'ASC']],
+        },
+      ],
+    });
+
+    if (!route) {
+      console.log(
+        `No route scheduled for today for truck ${truck.truckId}. Fetching latest route...`
+      );
+
+      const latestRoute = await Route.findOne({
+        where: { truckId: truck.id },
+        order: [['scheduledDate', 'DESC']],
+        include: [
+          {
+            model: Truck,
+            as: 'truck',
+            include: [{ model: User, as: 'driver', attributes: ['id', 'name', 'email'] }],
+          },
+          {
+            model: RouteStop,
+            as: 'stops',
+            separate: true,
+            order: [['sequence', 'ASC']],
+          },
+        ],
+      });
+
+      if (!latestRoute) {
+        return res.status(404).json({
+          error: 'No route scheduled',
+          message: 'You do not have any routes scheduled',
+        });
+      }
+
+      return res.json({ route: latestRoute });
+    }
+
+    res.json({ route });
+  } catch (error: any) {
+    handleError(res, error, "Failed to fetch today's route");
+  }
+};
+
+// ============================================
+// GET ROUTE BY TRUCK ID
+// ============================================
+export const getRouteByTruckId = async (req: AuthRequest, res: Response) => {
+  try {
+    const { truckId } = req.params;
+
+    const truck = await Truck.findOne({
+      where: { truckId: truckId },
+    });
+
+    if (!truck) {
+      return res.status(404).json({
+        error: 'Truck not found',
+        message: `No truck found with ID ${truckId}`,
+      });
+    }
+
+    const route = await Route.findOne({
+      where: { truckId: truck.id },
+      order: [['scheduledDate', 'DESC']],
+      include: [
+        {
+          model: Truck,
+          as: 'truck',
+          include: [{ model: User, as: 'driver', attributes: ['id', 'name', 'email'] }],
         },
         {
           model: RouteStop,
@@ -240,25 +424,66 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
 
     if (!route) {
       return res.status(404).json({
-        error: 'No route scheduled',
-        message: 'You do not have a route scheduled for today',
+        error: 'No route found',
+        message: `No route found for truck ${truckId}`,
       });
     }
 
     res.json({ route });
   } catch (error: any) {
-    console.error('Get today route error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch today\'s route',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+    handleError(res, error, 'Failed to fetch route');
+  }
+};
+
+// ============================================
+// GET ROUTE BY DRIVER ID
+// ============================================
+export const getRouteByDriverId = async (req: AuthRequest, res: Response) => {
+  try {
+    const { driverId } = req.params;
+
+    const truck = await Truck.findOne({ where: { driverId } });
+
+    if (!truck) {
+      return res.status(404).json({
+        error: 'No truck assigned',
+        message: `Driver ${driverId} has no truck assigned`,
+      });
+    }
+
+    const route = await Route.findOne({
+      where: { truckId: truck.id },
+      order: [['scheduledDate', 'DESC']],
+      include: [
+        {
+          model: Truck,
+          as: 'truck',
+          include: [{ model: User, as: 'driver', attributes: ['id', 'name', 'email'] }],
+        },
+        {
+          model: RouteStop,
+          as: 'stops',
+          separate: true,
+          order: [['sequence', 'ASC']],
+        },
+      ],
     });
+
+    if (!route) {
+      return res.status(404).json({
+        error: 'No route found',
+        message: `No route found for driver ${driverId}`,
+      });
+    }
+
+    res.json({ route });
+  } catch (error: any) {
+    handleError(res, error, 'Failed to fetch route by driver');
   }
 };
 
 // ============================================
 // GET ALL ROUTES
-// GET /api/routes
-// Requires: admin/management
 // ============================================
 export const getAllRoutes = async (req: AuthRequest, res: Response) => {
   try {
@@ -283,6 +508,12 @@ export const getAllRoutes = async (req: AuthRequest, res: Response) => {
           as: 'truck',
           include: [{ model: User, as: 'driver', attributes: ['id', 'name', 'email'] }],
         },
+        {
+          model: RouteStop,
+          as: 'stops',
+          separate: true,
+          order: [['sequence', 'ASC']],
+        },
       ],
       order: [['scheduledDate', 'DESC']],
       limit: parseInt(limit as string),
@@ -296,18 +527,12 @@ export const getAllRoutes = async (req: AuthRequest, res: Response) => {
       routes,
     });
   } catch (error: any) {
-    console.error('Get all routes error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch routes',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
-    });
+    handleError(res, error, 'Failed to fetch routes');
   }
 };
 
 // ============================================
 // GET ROUTE BY ID
-// GET /api/routes/:id
-// Requires: authenticated (any role)
 // ============================================
 export const getRouteById = async (req: AuthRequest, res: Response) => {
   try {
@@ -333,18 +558,12 @@ export const getRouteById = async (req: AuthRequest, res: Response) => {
 
     res.json({ route });
   } catch (error: any) {
-    console.error('Get route error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch route',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
-    });
+    handleError(res, error, 'Failed to fetch route');
   }
 };
 
 // ============================================
 // UPDATE ROUTE STATUS
-// PATCH /api/routes/:id/status
-// Requires: driver (own route) or admin
 // ============================================
 export const updateRouteStatus = async (req: AuthRequest, res: Response) => {
   try {
@@ -392,18 +611,12 @@ export const updateRouteStatus = async (req: AuthRequest, res: Response) => {
       route,
     });
   } catch (error: any) {
-    console.error('Update route status error:', error);
-    res.status(500).json({
-      error: 'Failed to update route status',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
-    });
+    handleError(res, error, 'Failed to update route status');
   }
 };
 
 // ============================================
 // DELETE ROUTE
-// DELETE /api/routes/:id
-// Requires: admin/management
 // ============================================
 export const deleteRoute = async (req: AuthRequest, res: Response) => {
   try {
@@ -412,22 +625,17 @@ export const deleteRoute = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Route not found' });
     }
 
+    await RouteStop.destroy({ where: { routeId: route.id } });
     await route.destroy();
 
     res.json({ message: 'Route deleted successfully' });
   } catch (error: any) {
-    console.error('Delete route error:', error);
-    res.status(500).json({
-      error: 'Failed to delete route',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
-    });
+    handleError(res, error, 'Failed to delete route');
   }
 };
 
 // ============================================
 // GET ROUTE STATS
-// GET /api/routes/stats
-// Requires: admin/management
 // ============================================
 export const getRouteStats = async (req: AuthRequest, res: Response) => {
   try {
@@ -445,17 +653,13 @@ export const getRouteStats = async (req: AuthRequest, res: Response) => {
 
     res.json({ stats });
   } catch (error: any) {
-    console.error('Get route stats error:', error);
-    res.status(500).json({
-      error: 'Failed to fetch route stats',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
-    });
+    handleError(res, error, 'Failed to fetch route stats');
   }
 };
+
 // ============================================
 // COMPLETE A STOP
-// PATCH /api/routes/:routeId/stops/:stopId/complete
-// Requires: driver (own route) or admin
+// AUTO-RECORDS actualStart (first stop) + actualEnd (last stop)
 // ============================================
 export const completeStop = async (req: AuthRequest, res: Response) => {
   try {
@@ -465,7 +669,6 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
 
     const { beforePhoto, afterPhoto, notes } = req.body;
 
-    // Find the stop with its route and truck
     const stop = await RouteStop.findByPk(req.params.stopId, {
       include: [
         {
@@ -487,7 +690,6 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Permission check
     const isAdmin = req.user.role === 'admin' || req.user.role === 'management';
     const isOwnRoute = route.truck?.driverId === req.user.id;
 
@@ -498,9 +700,13 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // ============================================
-    // VALIDATION: Complaint stops require photos
-    // ============================================
+    if (stop.status === StopStatus.COMPLETED) {
+      return res.status(400).json({
+        error: 'Already completed',
+        message: 'This stop has already been completed',
+      });
+    }
+
     if (stop.isComplaintStop) {
       if (!beforePhoto || !afterPhoto) {
         return res.status(400).json({
@@ -510,9 +716,6 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // ============================================
-    // UPDATE STOP
-    // ============================================
     stop.status = StopStatus.COMPLETED;
     stop.completedAt = new Date();
 
@@ -522,9 +725,6 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
 
     await stop.save();
 
-    // ============================================
-    // UPDATE ROUTE PROGRESS
-    // ============================================
     const completedCount = await RouteStop.count({
       where: {
         routeId: route.id,
@@ -532,20 +732,42 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
       },
     });
 
+    const handledCount = await RouteStop.count({
+      where: {
+        routeId: route.id,
+        status: { [Op.in]: [StopStatus.COMPLETED, StopStatus.SKIPPED] },
+      },
+    });
+
     route.completedStops = completedCount;
 
-    // Auto-complete route if all stops are done
-    if (completedCount >= route.totalStops) {
+    // ✅ RECORD actualStart when the FIRST stop is handled
+    if (!route.actualStart && handledCount > 0) {
+      route.actualStart = new Date();
+      console.log(
+        `⏱️ Route ${route.id} actualStart recorded: ${route.actualStart.toISOString()}`
+      );
+    }
+
+    const allStopsHandled = handledCount >= route.totalStops;
+
+    if (allStopsHandled) {
       route.status = RouteStatus.COMPLETED;
+      // ✅ RECORD actualEnd when ALL stops are handled
+      if (!route.actualEnd) {
+        route.actualEnd = new Date();
+        console.log(
+          `⏱️ Route ${route.id} actualEnd recorded: ${route.actualEnd.toISOString()}`
+        );
+      }
     } else if (route.status === RouteStatus.PENDING) {
       route.status = RouteStatus.IN_PROGRESS;
     }
 
     await route.save();
 
-    // ============================================
-    // IF COMPLAINT STOP — UPDATE LINKED REPORT
-    // ============================================
+    await updateTruckStatusFromRoute(route.id, completedCount, handledCount);
+
     if (stop.isComplaintStop && stop.reportId) {
       const report = await Report.findByPk(stop.reportId);
       if (report && report.status !== 'resolved') {
@@ -555,7 +777,6 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Reload stop
     const updatedStop = await RouteStop.findByPk(stop.id);
 
     res.json({
@@ -572,18 +793,13 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (error: any) {
-    console.error('Complete stop error:', error);
-    res.status(500).json({
-      error: 'Failed to complete stop',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
-    });
+    handleError(res, error, 'Failed to complete stop');
   }
 };
 
 // ============================================
 // SKIP A STOP
-// PATCH /api/routes/:routeId/stops/:stopId/skip
-// Requires: driver (own route) or admin
+// AUTO-RECORDS actualStart (first stop) + actualEnd (last stop)
 // ============================================
 export const skipStop = async (req: AuthRequest, res: Response) => {
   try {
@@ -621,7 +837,6 @@ export const skipStop = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Permission check
     const isAdmin = req.user.role === 'admin' || req.user.role === 'management';
     const isOwnRoute = route.truck?.driverId === req.user.id;
 
@@ -639,13 +854,26 @@ export const skipStop = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    if (stop.status === StopStatus.SKIPPED) {
+      return res.status(400).json({
+        error: 'Already skipped',
+        message: 'This stop has already been skipped',
+      });
+    }
+
     stop.status = StopStatus.SKIPPED;
     stop.skippedReason = reason.trim();
-    stop.completedAt = new Date(); // Mark when it was handled
+    stop.completedAt = new Date();
 
     await stop.save();
 
-    // Update route progress
+    const completedCount = await RouteStop.count({
+      where: {
+        routeId: route.id,
+        status: StopStatus.COMPLETED,
+      },
+    });
+
     const handledCount = await RouteStop.count({
       where: {
         routeId: route.id,
@@ -653,31 +881,44 @@ export const skipStop = async (req: AuthRequest, res: Response) => {
       },
     });
 
-    if (handledCount >= route.totalStops) {
+    // ✅ RECORD actualStart when the FIRST stop is handled (completed OR skipped)
+    if (!route.actualStart && handledCount > 0) {
+      route.actualStart = new Date();
+      console.log(
+        `⏱️ Route ${route.id} actualStart recorded (via skip): ${route.actualStart.toISOString()}`
+      );
+    }
+
+    const allStopsHandled = handledCount >= route.totalStops;
+
+    if (allStopsHandled) {
       route.status = RouteStatus.COMPLETED;
+      // ✅ RECORD actualEnd when ALL stops are handled
+      if (!route.actualEnd) {
+        route.actualEnd = new Date();
+        console.log(
+          `⏱️ Route ${route.id} actualEnd recorded (via skip): ${route.actualEnd.toISOString()}`
+        );
+      }
     } else if (route.status === RouteStatus.PENDING) {
       route.status = RouteStatus.IN_PROGRESS;
     }
 
     await route.save();
 
+    await updateTruckStatusFromRoute(route.id, completedCount, handledCount);
+
     res.json({
       message: 'Stop skipped successfully',
       stop,
     });
   } catch (error: any) {
-    console.error('Skip stop error:', error);
-    res.status(500).json({
-      error: 'Failed to skip stop',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
-    });
+    handleError(res, error, 'Failed to skip stop');
   }
 };
 
 // ============================================
 // UPDATE STOP NOTES
-// PATCH /api/routes/:routeId/stops/:stopId/notes
-// Requires: driver (own route) or admin
 // ============================================
 export const updateStopNotes = async (req: AuthRequest, res: Response) => {
   try {
@@ -708,7 +949,6 @@ export const updateStopNotes = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Permission check
     const isAdmin = req.user.role === 'admin' || req.user.role === 'management';
     const isOwnRoute = route.truck?.driverId === req.user.id;
 
@@ -727,18 +967,12 @@ export const updateStopNotes = async (req: AuthRequest, res: Response) => {
       stop,
     });
   } catch (error: any) {
-    console.error('Update stop notes error:', error);
-    res.status(500).json({
-      error: 'Failed to update notes',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
-    });
+    handleError(res, error, 'Failed to update notes');
   }
 };
 
 // ============================================
 // ADD STOPS TO EXISTING ROUTE
-// POST /api/routes/:id/stops
-// Requires: admin/management
 // ============================================
 export const addStopsToRoute = async (req: AuthRequest, res: Response) => {
   try {
@@ -756,10 +990,14 @@ export const addStopsToRoute = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Route not found' });
     }
 
-    // Validate each stop
     for (let i = 0; i < stops.length; i++) {
       const stop = stops[i];
-      if (!stop.address || !stop.suburb || stop.latitude === undefined || stop.longitude === undefined) {
+      if (
+        !stop.address ||
+        !stop.suburb ||
+        stop.latitude === undefined ||
+        stop.longitude === undefined
+      ) {
         return res.status(400).json({
           error: `Stop ${i + 1} missing fields`,
           message: 'Each stop requires address, suburb, latitude, and longitude',
@@ -779,10 +1017,9 @@ export const addStopsToRoute = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Get current max sequence
-    const maxSeq = await RouteStop.max('sequence', {
+    const maxSeq = (await RouteStop.max('sequence', {
       where: { routeId: route.id },
-    }) as number | null;
+    })) as number | null;
 
     const startSeq = (maxSeq || 0) + 1;
 
@@ -802,11 +1039,9 @@ export const addStopsToRoute = async (req: AuthRequest, res: Response) => {
 
     await RouteStop.bulkCreate(stopRecords);
 
-    // Update route totalStops
     route.totalStops += stops.length;
     await route.save();
 
-    // Reload route
     const fullRoute = await Route.findByPk(route.id, {
       include: [
         {
@@ -823,18 +1058,12 @@ export const addStopsToRoute = async (req: AuthRequest, res: Response) => {
       route: fullRoute,
     });
   } catch (error: any) {
-    console.error('Add stops error:', error);
-    res.status(500).json({
-      error: 'Failed to add stops',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
-    });
+    handleError(res, error, 'Failed to add stops');
   }
 };
 
 // ============================================
 // DELETE A STOP
-// DELETE /api/routes/:routeId/stops/:stopId
-// Requires: admin/management
 // ============================================
 export const deleteStop = async (req: AuthRequest, res: Response) => {
   try {
@@ -852,7 +1081,6 @@ export const deleteStop = async (req: AuthRequest, res: Response) => {
     const routeId = stop.routeId;
     await stop.destroy();
 
-    // Update route totalStops
     const route = await Route.findByPk(routeId);
     if (route) {
       route.totalStops = Math.max(0, route.totalStops - 1);
@@ -861,28 +1089,21 @@ export const deleteStop = async (req: AuthRequest, res: Response) => {
 
     res.json({ message: 'Stop deleted successfully' });
   } catch (error: any) {
-    console.error('Delete stop error:', error);
-    res.status(500).json({
-      error: 'Failed to delete stop',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
-    });
+    handleError(res, error, 'Failed to delete stop');
   }
 };
 
 // ============================================
 // AUTO-CREATE ROUTE FROM COMPLAINTS
-// POST /api/routes/from-complaints
-// Requires: admin/management
-// Creates a route with stops derived from pending complaints
 // ============================================
 export const createRouteFromComplaints = async (req: AuthRequest, res: Response) => {
   try {
     const { truckId, zone, scheduledDate, scheduledStart, scheduledEnd } = req.body;
 
-    if (!truckId || !zone || !scheduledDate || !scheduledStart || !scheduledEnd) {
+    if (!truckId || !zone || !scheduledDate) {
       return res.status(400).json({
         error: 'Missing required fields',
-        message: 'truckId, zone, scheduledDate, scheduledStart, and scheduledEnd are required',
+        message: 'truckId, zone, and scheduledDate are required',
       });
     }
 
@@ -890,8 +1111,31 @@ export const createRouteFromComplaints = async (req: AuthRequest, res: Response)
       return res.status(400).json({ error: 'Invalid zone' });
     }
 
-    // Find pending reports in this zone's suburbs
+    const scheduledDateObj = new Date(scheduledDate);
+
+    if (!isWorkingDayForZone(scheduledDateObj, zone)) {
+      const dayName = scheduledDateObj.toLocaleDateString('en-US', {
+        weekday: 'long',
+      });
+      const workingDays = getWorkingDaysForZone(zone);
+      return res.status(400).json({
+        error: 'Not a collection day',
+        message: `${zone} does not collect on ${dayName}s. Collection days: ${workingDays.join(', ')}`,
+      });
+    }
+
+    const truck = await Truck.findByPk(truckId);
+    if (!truck) {
+      return res.status(404).json({ error: 'Truck not found' });
+    }
+
+    const { defaultStart, defaultEnd } = getDefaultRouteTimes(scheduledDate);
+
+    const finalStart = scheduledStart ? new Date(scheduledStart) : defaultStart;
+    const finalEnd = scheduledEnd ? new Date(scheduledEnd) : defaultEnd;
+
     const zoneSuburbs = ZONES[zone as ZoneName].suburbs;
+
     const reports = await Report.findAll({
       where: {
         status: 'pending',
@@ -911,14 +1155,13 @@ export const createRouteFromComplaints = async (req: AuthRequest, res: Response)
       });
     }
 
-    // Create route
     const route = await Route.create({
       truckId,
       zone,
       suburb: zoneSuburbs[0],
       scheduledDate: new Date(scheduledDate),
-      scheduledStart: new Date(scheduledStart),
-      scheduledEnd: new Date(scheduledEnd),
+      scheduledStart: finalStart,
+      scheduledEnd: finalEnd,
       estimatedDuration: 480,
       status: RouteStatus.PENDING,
       totalStops: reports.length,
@@ -926,19 +1169,25 @@ export const createRouteFromComplaints = async (req: AuthRequest, res: Response)
       notes: `Auto-generated from ${reports.length} complaint(s)`,
     });
 
-    // Create stops from reports
-    const stopRecords = reports.map((report, index) => ({
-      routeId: route.id,
-      sequence: index + 1,
-      address: report.address,
-      suburb: getZoneForSuburb(zoneSuburbs[0]) ? zoneSuburbs[0] : 'Unknown',
-      latitude: parseFloat(report.latitude?.toString() || '-9.4438'),
-      longitude: parseFloat(report.longitude?.toString() || '147.1803'),
-      status: StopStatus.PENDING,
-      isComplaintStop: true,
-      complaintType: report.issueType as any,
-      reportId: report.id,
-    }));
+    const stopRecords = reports.map((report, index) => {
+      const reportSuburb =
+        zoneSuburbs.find((suburb) =>
+          report.address.toLowerCase().includes(suburb.toLowerCase())
+        ) || zoneSuburbs[0];
+
+      return {
+        routeId: route.id,
+        sequence: index + 1,
+        address: report.address,
+        suburb: reportSuburb,
+        latitude: parseFloat(report.latitude?.toString() || '-9.4438'),
+        longitude: parseFloat(report.longitude?.toString() || '147.1803'),
+        status: StopStatus.PENDING,
+        isComplaintStop: true,
+        complaintType: report.issueType as any,
+        reportId: report.id,
+      };
+    });
 
     await RouteStop.bulkCreate(stopRecords);
 
@@ -958,10 +1207,39 @@ export const createRouteFromComplaints = async (req: AuthRequest, res: Response)
       route: fullRoute,
     });
   } catch (error: any) {
-    console.error('Create route from complaints error:', error);
-    res.status(500).json({
-      error: 'Failed to create route',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+    handleError(res, error, 'Failed to create route from complaints');
+  }
+};
+
+// ============================================
+// MIGRATION: Fix existing route times
+// ============================================
+export const fixRouteTimes = async (req: AuthRequest, res: Response) => {
+  try {
+    const routes = await Route.findAll();
+
+    let updatedCount = 0;
+
+    for (const route of routes) {
+      const date = new Date(route.scheduledDate);
+
+      const start = new Date(date);
+      start.setHours(8, 0, 0, 0);
+
+      const end = new Date(date);
+      end.setHours(16, 0, 0, 0);
+
+      route.scheduledStart = start;
+      route.scheduledEnd = end;
+      await route.save();
+
+      updatedCount++;
+    }
+
+    res.json({
+      message: `Updated ${updatedCount} routes to 8:00 AM - 4:00 PM`,
     });
+  } catch (error: any) {
+    handleError(res, error, 'Failed to fix route times');
   }
 };

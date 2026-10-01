@@ -1,0 +1,14 @@
+$kind: http-request
+description: ""
+url: "{{baseUrl}}/auth/login"
+method: POST
+body:
+  type: json
+  content: "{\r
+
+    \  \"email\": \"admin@cleantrack.local\",\r
+
+    \  \"password\": \"password123\"\r
+
+    }\r\n"
+order: 1790646578313

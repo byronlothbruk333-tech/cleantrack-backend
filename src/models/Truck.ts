@@ -176,4 +176,7 @@ Truck.belongsTo(User, {
   as: 'driver',
 });
 
+// ============================================
+// DEFAULT EXPORT (CRITICAL)
+// ============================================
 export default Truck;

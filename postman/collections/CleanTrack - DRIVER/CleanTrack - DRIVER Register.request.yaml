@@ -1,0 +1,24 @@
+$kind: http-request
+description: ""
+url: "{{baseUrl}}/auth/register"
+method: POST
+body:
+  type: json
+  content: "{\r
+
+    \  \"name\": \"Issac\",\r
+
+    \  \"email\": \"driver9@cleantrack.local\",\r
+
+    \  \"password\": \"driverpass9!\",\r
+
+    \  \"role\": \"driver\"\r
+
+    }\r
+
+    \r\n"
+auth:
+  type: bearer
+  credentials:
+    token: "{{adminToken }}"
+order: 1790651350686

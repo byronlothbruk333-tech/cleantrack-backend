@@ -35,6 +35,7 @@ interface ReportAttributes {
   issueType: IssueType;
   description: string;
   address: string;
+  zone?: string | null; // ADDED
   latitude?: number | null;
   longitude?: number | null;
   photos: string[];
@@ -53,6 +54,7 @@ interface ReportCreationAttributes
   extends Optional<
     ReportAttributes,
     | 'id'
+    | 'zone' // ADDED
     | 'latitude'
     | 'longitude'
     | 'photos'
@@ -79,6 +81,7 @@ class Report
   public issueType!: IssueType;
   public description!: string;
   public address!: string;
+  public zone?: string | null; // ADDED
   public latitude?: number | null;
   public longitude?: number | null;
   public photos!: string[];
@@ -106,10 +109,7 @@ Report.init(
     citizenId: {
       type: DataTypes.UUID,
       allowNull: false,
-      references: {
-        model: 'users',
-        key: 'id',
-      },
+      references: { model: 'users', key: 'id' },
       onDelete: 'CASCADE',
     },
     issueType: {
@@ -123,6 +123,11 @@ Report.init(
     address: {
       type: DataTypes.STRING(255),
       allowNull: false,
+    },
+    // ADDED
+    zone: {
+      type: DataTypes.STRING(50),
+      allowNull: true,
     },
     latitude: {
       type: DataTypes.DECIMAL(10, 8),
@@ -150,10 +155,7 @@ Report.init(
     assignedTo: {
       type: DataTypes.UUID,
       allowNull: true,
-      references: {
-        model: 'users',
-        key: 'id',
-      },
+      references: { model: 'users', key: 'id' },
       onDelete: 'SET NULL',
     },
     resolvedAt: {
@@ -182,6 +184,7 @@ Report.init(
       { fields: ['status'] },
       { fields: ['priority'] },
       { fields: ['issueType'] },
+      { fields: ['zone'] }, // ADDED for faster zone filtering
       { fields: ['createdAt'] },
     ],
   }

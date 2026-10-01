@@ -13,6 +13,7 @@ import {
   addStopsToRoute,
   deleteStop,
   createRouteFromComplaints,
+  fixRouteTimes,
 } from '../controllers/routeController';
 import { authenticate, authorize } from '../middleware/auth';
 import { UserRole } from '../models/User';
@@ -36,6 +37,14 @@ router.get(
   '/stats',
   authorize(UserRole.ADMIN, UserRole.MANAGEMENT),
   getRouteStats
+);
+
+// POST /api/routes/fix-times — migration to fix old route times (admin only)
+// NOTE: Must be placed before /:id routes
+router.post(
+  '/fix-times',
+  authorize(UserRole.ADMIN, UserRole.MANAGEMENT),
+  fixRouteTimes
 );
 
 // ============================================
@@ -103,4 +112,7 @@ router.delete(
   deleteStop
 );
 
+// ============================================
+// DEFAULT EXPORT (CRITICAL - DO NOT DELETE)
+// ============================================
 export default router;

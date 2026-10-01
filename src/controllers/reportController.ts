@@ -1,8 +1,13 @@
 import { Request, Response } from 'express';
+import { Op } from 'sequelize';
 import Report, { IssueType, ReportStatus, Priority } from '../models/Report';
 import User from '../models/User';
+import Truck from '../models/Truck';
+import Route, { RouteStatus } from '../models/Route';
+import RouteStop, { StopStatus } from '../models/RouteStop';
 import { AuthRequest } from '../middleware/auth';
 import ReportComment from '../models/ReportComment';
+import { ZoneName } from '../constants/portMoresbyZones'; // <-- ADDED
 
 // ============================================
 // CREATE REPORT
@@ -19,6 +24,7 @@ export const createReport = async (req: AuthRequest, res: Response) => {
       issueType,
       description,
       address,
+      zone,
       latitude,
       longitude,
       photos,
@@ -27,7 +33,6 @@ export const createReport = async (req: AuthRequest, res: Response) => {
       contactEmail,
     } = req.body;
 
-    // Validate required fields
     if (!issueType || !description || !address) {
       return res.status(400).json({
         error: 'Missing required fields',
@@ -35,7 +40,6 @@ export const createReport = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Validate issue type
     const allowedIssueTypes = Object.values(IssueType);
     if (!allowedIssueTypes.includes(issueType)) {
       return res.status(400).json({
@@ -44,7 +48,6 @@ export const createReport = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Auto-set priority based on issue type
     let priority: Priority = Priority.MEDIUM;
     if (issueType === IssueType.ILLEGAL_DUMPING) {
       priority = Priority.HIGH;
@@ -54,12 +57,12 @@ export const createReport = async (req: AuthRequest, res: Response) => {
       priority = Priority.MEDIUM;
     }
 
-    // Create the report
     const report = await Report.create({
       citizenId: req.user.id,
       issueType,
       description,
       address,
+      zone: zone || null,
       latitude: latitude || null,
       longitude: longitude || null,
       photos: photos || [],
@@ -99,10 +102,7 @@ export const getMyReports = async (req: AuthRequest, res: Response) => {
       order: [['createdAt', 'DESC']],
     });
 
-    res.json({
-      count: reports.length,
-      reports,
-    });
+    res.json({ count: reports.length, reports });
   } catch (error: any) {
     console.error('Get my reports error:', error);
     res.status(500).json({
@@ -123,15 +123,16 @@ export const getAllReports = async (req: AuthRequest, res: Response) => {
       status,
       priority,
       issueType,
+      zone,
       limit = '50',
       offset = '0',
     } = req.query;
 
-    // Build filter
     const where: any = {};
     if (status) where.status = status;
     if (priority) where.priority = priority;
     if (issueType) where.issueType = issueType;
+    if (zone) where.zone = zone;
 
     const { count, rows: reports } = await Report.findAndCountAll({
       where,
@@ -164,10 +165,6 @@ export const getAllReports = async (req: AuthRequest, res: Response) => {
 
 // ============================================
 // GET REPORT BY ID
-// GET /api/reports/:id
-// Requires: authenticate
-// - Citizens can only see their own reports
-// - Admins can see any report
 // ============================================
 export const getReportById = async (req: AuthRequest, res: Response) => {
   try {
@@ -189,11 +186,7 @@ export const getReportById = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    // Citizens can only view their own reports
-    if (
-      req.user.role === 'citizen' &&
-      report.citizenId !== req.user.id
-    ) {
+    if (req.user.role === 'citizen' && report.citizenId !== req.user.id) {
       return res.status(403).json({
         error: 'Access denied',
         message: 'You can only view your own reports',
@@ -212,8 +205,6 @@ export const getReportById = async (req: AuthRequest, res: Response) => {
 
 // ============================================
 // UPDATE REPORT STATUS
-// PATCH /api/reports/:id/status
-// Requires: authenticate + authorize(admin, management)
 // ============================================
 export const updateReportStatus = async (req: AuthRequest, res: Response) => {
   try {
@@ -243,7 +234,6 @@ export const updateReportStatus = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    // Update fields
     report.status = status;
     if (assignedTo !== undefined) {
       report.assignedTo = assignedTo || null;
@@ -269,10 +259,6 @@ export const updateReportStatus = async (req: AuthRequest, res: Response) => {
 
 // ============================================
 // UPDATE REPORT
-// PUT /api/reports/:id
-// Requires: authenticate
-// - Citizens can update their own PENDING reports
-// - Admins can update any report
 // ============================================
 export const updateReport = async (req: AuthRequest, res: Response) => {
   try {
@@ -285,10 +271,8 @@ export const updateReport = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    // Permission check
     const isOwner = report.citizenId === req.user.id;
-    const isAdmin =
-      req.user.role === 'admin' || req.user.role === 'management';
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'management';
 
     if (!isOwner && !isAdmin) {
       return res.status(403).json({
@@ -297,7 +281,6 @@ export const updateReport = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Citizens can only update pending reports
     if (isOwner && !isAdmin && report.status !== ReportStatus.PENDING) {
       return res.status(403).json({
         error: 'Cannot update',
@@ -305,11 +288,11 @@ export const updateReport = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Only allow updating certain fields
-    const { description, address, latitude, longitude, photos, issueType } = req.body;
+    const { description, address, latitude, longitude, photos, issueType, zone } = req.body;
 
     if (description !== undefined) report.description = description;
     if (address !== undefined) report.address = address;
+    if (zone !== undefined) report.zone = zone;
     if (latitude !== undefined) report.latitude = latitude;
     if (longitude !== undefined) report.longitude = longitude;
     if (photos !== undefined) report.photos = photos;
@@ -317,10 +300,7 @@ export const updateReport = async (req: AuthRequest, res: Response) => {
 
     await report.save();
 
-    res.json({
-      message: 'Report updated successfully',
-      report,
-    });
+    res.json({ message: 'Report updated successfully', report });
   } catch (error: any) {
     console.error('Update report error:', error);
     res.status(500).json({
@@ -332,10 +312,6 @@ export const updateReport = async (req: AuthRequest, res: Response) => {
 
 // ============================================
 // DELETE REPORT
-// DELETE /api/reports/:id
-// Requires: authenticate
-// - Citizens can delete their own PENDING reports
-// - Admins can delete any report
 // ============================================
 export const deleteReport = async (req: AuthRequest, res: Response) => {
   try {
@@ -349,8 +325,7 @@ export const deleteReport = async (req: AuthRequest, res: Response) => {
     }
 
     const isOwner = report.citizenId === req.user.id;
-    const isAdmin =
-      req.user.role === 'admin' || req.user.role === 'management';
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'management';
 
     if (!isOwner && !isAdmin) {
       return res.status(403).json({
@@ -359,7 +334,6 @@ export const deleteReport = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Citizens can only delete pending reports
     if (isOwner && !isAdmin && report.status !== ReportStatus.PENDING) {
       return res.status(403).json({
         error: 'Cannot delete',
@@ -368,10 +342,7 @@ export const deleteReport = async (req: AuthRequest, res: Response) => {
     }
 
     await report.destroy();
-
-    res.json({
-      message: 'Report deleted successfully',
-    });
+    res.json({ message: 'Report deleted successfully' });
   } catch (error: any) {
     console.error('Delete report error:', error);
     res.status(500).json({
@@ -382,9 +353,7 @@ export const deleteReport = async (req: AuthRequest, res: Response) => {
 };
 
 // ============================================
-// GET REPORT STATS (for citizen dashboard)
-// GET /api/reports/stats
-// Requires: authenticate (citizen)
+// GET REPORT STATS
 // ============================================
 export const getReportStats = async (req: AuthRequest, res: Response) => {
   try {
@@ -414,16 +383,13 @@ export const getReportStats = async (req: AuthRequest, res: Response) => {
     });
   }
 };
+
 // ============================================
-// GET REPORT COUNTS BY STATUS
-// GET /api/reports/counts
-// Requires: authenticate + authorize(admin, management)
+// GET REPORT COUNTS
 // ============================================
 export const getReportCounts = async (req: AuthRequest, res: Response) => {
   try {
-    const reports = await Report.findAll({
-      attributes: ['status'],
-    });
+    const reports = await Report.findAll({ attributes: ['status'] });
 
     const counts = {
       total: reports.length,
@@ -445,14 +411,11 @@ export const getReportCounts = async (req: AuthRequest, res: Response) => {
 
 // ============================================
 // GET REPORTS BY CITIZEN
-// GET /api/reports/by-citizen/:citizenId
-// Requires: authenticate + authorize(admin, management)
 // ============================================
 export const getReportsByCitizen = async (req: AuthRequest, res: Response) => {
   try {
     const { citizenId } = req.params;
 
-    // Verify the citizen exists
     const citizen = await User.findByPk(citizenId, {
       attributes: ['id', 'name', 'email', 'phone'],
     });
@@ -466,11 +429,7 @@ export const getReportsByCitizen = async (req: AuthRequest, res: Response) => {
       order: [['createdAt', 'DESC']],
     });
 
-    res.json({
-      citizen,
-      count: reports.length,
-      reports,
-    });
+    res.json({ citizen, count: reports.length, reports });
   } catch (error: any) {
     console.error('Get reports by citizen error:', error);
     res.status(500).json({
@@ -481,11 +440,7 @@ export const getReportsByCitizen = async (req: AuthRequest, res: Response) => {
 };
 
 // ============================================
-// GET COMMENTS ON A REPORT
-// GET /api/reports/:id/comments
-// Requires: authenticate
-// - Citizens see only public comments on their own reports
-// - Admins/drivers see all comments
+// GET COMMENTS
 // ============================================
 export const getReportComments = async (req: AuthRequest, res: Response) => {
   try {
@@ -498,12 +453,8 @@ export const getReportComments = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    const isAdmin =
-      req.user.role === 'admin' || req.user.role === 'management';
-    const isDriver = req.user.role === 'driver';
     const isOwner = report.citizenId === req.user.id;
 
-    // Citizens can only view their own reports
     if (req.user.role === 'citizen' && !isOwner) {
       return res.status(403).json({
         error: 'Access denied',
@@ -511,7 +462,6 @@ export const getReportComments = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Build filter — citizens only see public comments
     const where: any = { reportId: req.params.id };
     if (req.user.role === 'citizen') {
       where.isInternal = false;
@@ -529,10 +479,7 @@ export const getReportComments = async (req: AuthRequest, res: Response) => {
       order: [['createdAt', 'ASC']],
     });
 
-    res.json({
-      count: comments.length,
-      comments,
-    });
+    res.json({ count: comments.length, comments });
   } catch (error: any) {
     console.error('Get report comments error:', error);
     res.status(500).json({
@@ -543,11 +490,7 @@ export const getReportComments = async (req: AuthRequest, res: Response) => {
 };
 
 // ============================================
-// ADD A COMMENT TO A REPORT
-// POST /api/reports/:id/comments
-// Requires: authenticate
-// - Citizens can comment on their own reports (public only)
-// - Admins/drivers can add public or internal comments
+// ADD COMMENT
 // ============================================
 export const addReportComment = async (req: AuthRequest, res: Response) => {
   try {
@@ -569,12 +512,10 @@ export const addReportComment = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    const isAdmin =
-      req.user.role === 'admin' || req.user.role === 'management';
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'management';
     const isDriver = req.user.role === 'driver';
     const isOwner = report.citizenId === req.user.id;
 
-    // Citizens can only comment on their own reports
     if (req.user.role === 'citizen' && !isOwner) {
       return res.status(403).json({
         error: 'Access denied',
@@ -582,7 +523,6 @@ export const addReportComment = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // Citizens cannot create internal comments
     const allowInternal = isAdmin || isDriver;
     const commentIsInternal = allowInternal && isInternal === true;
 
@@ -593,7 +533,6 @@ export const addReportComment = async (req: AuthRequest, res: Response) => {
       isInternal: commentIsInternal,
     });
 
-    // Reload with author info
     const commentWithAuthor = await ReportComment.findByPk(comment.id, {
       include: [
         {
@@ -618,11 +557,7 @@ export const addReportComment = async (req: AuthRequest, res: Response) => {
 };
 
 // ============================================
-// DELETE A COMMENT
-// DELETE /api/reports/:id/comments/:commentId
-// Requires: authenticate
-// - Only the author can delete their own comment
-// - Admins can delete any comment
+// DELETE COMMENT
 // ============================================
 export const deleteReportComment = async (req: AuthRequest, res: Response) => {
   try {
@@ -635,8 +570,7 @@ export const deleteReportComment = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Comment not found' });
     }
 
-    const isAdmin =
-      req.user.role === 'admin' || req.user.role === 'management';
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'management';
     const isAuthor = comment.userId === req.user.id;
 
     if (!isAuthor && !isAdmin) {
@@ -647,12 +581,131 @@ export const deleteReportComment = async (req: AuthRequest, res: Response) => {
     }
 
     await comment.destroy();
-
     res.json({ message: 'Comment deleted successfully' });
   } catch (error: any) {
     console.error('Delete report comment error:', error);
     res.status(500).json({
       error: 'Failed to delete comment',
+      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+    });
+  }
+};
+
+// ============================================
+// ASSIGN TRUCK TO COMPLAINT
+// POST /api/reports/:id/assign-truck
+// Requires: admin/management
+// Creates a new route (or adds a stop) for the specified truck
+// ============================================
+export const assignTruckToComplaint = async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { truckId } = req.body;
+
+    if (!truckId) {
+      return res.status(400).json({
+        error: 'Missing truck ID',
+        message: 'truckId is required',
+      });
+    }
+
+    // 1. Find the report
+    const report = await Report.findByPk(id);
+    if (!report) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    if (report.status === ReportStatus.RESOLVED) {
+      return res.status(400).json({
+        error: 'Already resolved',
+        message: 'This complaint has already been resolved',
+      });
+    }
+
+    // 2. Find the truck
+    const truck = await Truck.findByPk(truckId, {
+      include: [{ model: User, as: 'driver' }],
+    });
+    if (!truck) {
+      return res.status(404).json({ error: 'Truck not found' });
+    }
+
+    // 3. Look for an existing active route for this truck
+    let route = await Route.findOne({
+      where: {
+        truckId: truck.id,
+        status: { [Op.in]: [RouteStatus.PENDING, RouteStatus.IN_PROGRESS] },
+      },
+      order: [['scheduledDate', 'DESC']],
+    });
+
+    // 4. If no active route, create a new one
+    if (!route) {
+      const start = new Date();
+      start.setHours(8, 0, 0, 0);
+      const end = new Date();
+      end.setHours(16, 0, 0, 0);
+
+      // Cast report.zone to ZoneName for TypeScript
+      const zoneToUse: ZoneName =
+        (report.zone as ZoneName) || (truck.zone as ZoneName);
+
+      route = await Route.create({
+        truckId: truck.id,
+        zone: zoneToUse, // CAST FIXED HERE
+        suburb: report.address.split(',')[1]?.trim() || truck.zone,
+        scheduledDate: new Date(),
+        scheduledStart: start,
+        scheduledEnd: end,
+        estimatedDuration: 480,
+        status: RouteStatus.PENDING,
+        totalStops: 0,
+        completedStops: 0,
+        notes: `Complaint route for ${report.issueType}`,
+      });
+    }
+
+    // 5. Add the report as a new stop on the route
+    const maxSeq = (await RouteStop.max('sequence', {
+      where: { routeId: route.id },
+    })) as number | null;
+
+    const nextSeq = (maxSeq || 0) + 1;
+
+    const stop = await RouteStop.create({
+      routeId: route.id,
+      sequence: nextSeq,
+      address: report.address,
+      suburb: report.zone || truck.zone,
+      latitude: report.latitude ? parseFloat(report.latitude.toString()) : -9.4438,
+      longitude: report.longitude ? parseFloat(report.longitude.toString()) : 147.1803,
+      status: StopStatus.PENDING,
+      isComplaintStop: true,
+      complaintType: report.issueType as any,
+      reportId: report.id,
+    });
+
+    // 6. Update the route's stop count
+    route.totalStops += 1;
+    await route.save();
+
+    // 7. Update the report status to in-progress and assign the truck's driver
+    report.status = ReportStatus.IN_PROGRESS;
+    if (truck.driverId) {
+      report.assignedTo = truck.driverId;
+    }
+    await report.save();
+
+    res.json({
+      message: 'Truck assigned successfully',
+      route,
+      stop,
+      report,
+    });
+  } catch (error: any) {
+    console.error('Assign truck error:', error);
+    res.status(500).json({
+      error: 'Failed to assign truck',
       message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
     });
   }

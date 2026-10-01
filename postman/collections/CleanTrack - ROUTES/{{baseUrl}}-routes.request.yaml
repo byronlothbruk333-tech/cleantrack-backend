@@ -1,0 +1,55 @@
+$kind: http-request
+name: "{{baseUrl}}/routes"
+description: ""
+url: "{{baseUrl}}/routes"
+method: POST
+body:
+  type: json
+  content: "{\r
+
+    \  \"truckId\": \"17e21cef-f1b2-4425-9fc1-6f52dc9793f3\",\r
+
+    \  \"zone\": \"Zone 1\",\r
+
+    \  \"suburb\": \"5 Mile\",\r
+
+    \  \"scheduledDate\": \"TODAY_PNG_DATE\",\r
+
+    \  \"scheduledStart\": \"TODAY_PNG_DATE_T08:00:00+10:00\",\r
+
+    \  \"scheduledEnd\": \"TODAY_PNG_DATE_T15:00:00+10:00\",\r
+
+    \  \"estimatedDuration\": 420,\r
+
+    \  \"notes\": \"Zone 1 — Mon/Wed/Fri collection\",\r
+
+    \  \"stops\": [\r
+
+    \    { \"sequence\": 1,  \"address\": \"Monise Street, 5 Mile\",    \"suburb\": \"5 Mile\", \"latitude\": -9.453939, \"longitude\": 147.199702 },\r
+
+    \    { \"sequence\": 2,  \"address\": \"Madaha Street, 5 Mile\",    \"suburb\": \"5 Mile\", \"latitude\": -9.449376, \"longitude\": 147.199740 },\r
+
+    \    { \"sequence\": 3,  \"address\": \"Gaigo Street, 5 Mile\",     \"suburb\": \"5 Mile\", \"latitude\": -9.445735, \"longitude\": 147.199547 },\r
+
+    \    { \"sequence\": 4,  \"address\": \"Homoka Street, 5 Mile\",    \"suburb\": \"5 Mile\", \"latitude\": -9.448254, \"longitude\": 147.197766 },\r
+
+    \    { \"sequence\": 5,  \"address\": \"Saraga Street, 6 Mile\",    \"suburb\": \"6 Mile\", \"latitude\": -9.457334, \"longitude\": 147.214699 },\r
+
+    \    { \"sequence\": 6,  \"address\": \"Kittyhawk Street, 6 Mile\", \"suburb\": \"6 Mile\", \"latitude\": -9.451147, \"longitude\": 147.212298 },\r
+
+    \    { \"sequence\": 7,  \"address\": \"Igua Street, Boroko\",      \"suburb\": \"Boroko\", \"latitude\": -9.473809, \"longitude\": 147.205633 },\r
+
+    \    { \"sequence\": 8,  \"address\": \"Laurabada Avenue, Boroko\", \"suburb\": \"Boroko\", \"latitude\": -9.473630, \"longitude\": 147.195887 },\r
+
+    \    { \"sequence\": 9,  \"address\": \"Lahara Avenue, Boroko\",    \"suburb\": \"Boroko\", \"latitude\": -9.468177, \"longitude\": 147.192714 },\r
+
+    \    { \"sequence\": 10, \"address\": \"Okari Street, Boroko\",     \"suburb\": \"Boroko\", \"latitude\": -9.465229, \"longitude\": 147.196952 }\r
+
+    \  ]\r
+
+    }"
+auth:
+  type: bearer
+  credentials:
+    token: "{{adminToken }}"
+order: 1790775194949

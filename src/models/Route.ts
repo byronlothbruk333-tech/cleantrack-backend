@@ -1,7 +1,6 @@
 import { DataTypes, Model, Optional } from 'sequelize';
 import sequelize from '../config/database';
-import Truck from './Truck';
-import { ZoneName } from '../constants/portMoresbyZones';
+import User from './User';
 
 // ============================================
 // ENUMS
@@ -14,17 +13,19 @@ export enum RouteStatus {
 }
 
 // ============================================
-// ATTRIBUTES
+// ATTRIBUTES INTERFACE
 // ============================================
 interface RouteAttributes {
   id: string;
   truckId: string;
-  zone: ZoneName;
+  zone: string;
   suburb: string;
   scheduledDate: Date;
   scheduledStart: Date;
   scheduledEnd: Date;
-  estimatedDuration: number; // minutes
+  actualStart?: Date | null;
+  actualEnd?: Date | null;
+  estimatedDuration: number;
   status: RouteStatus;
   totalStops: number;
   completedStops: number;
@@ -37,8 +38,9 @@ interface RouteCreationAttributes
   extends Optional<
     RouteAttributes,
     | 'id'
+    | 'actualStart'
+    | 'actualEnd'
     | 'status'
-    | 'totalStops'
     | 'completedStops'
     | 'notes'
     | 'createdAt'
@@ -46,7 +48,7 @@ interface RouteCreationAttributes
   > {}
 
 // ============================================
-// MODEL
+// MODEL CLASS
 // ============================================
 class Route
   extends Model<RouteAttributes, RouteCreationAttributes>
@@ -54,11 +56,13 @@ class Route
 {
   public id!: string;
   public truckId!: string;
-  public zone!: ZoneName;
+  public zone!: string;
   public suburb!: string;
   public scheduledDate!: Date;
   public scheduledStart!: Date;
   public scheduledEnd!: Date;
+  public actualStart?: Date | null;
+  public actualEnd?: Date | null;
   public estimatedDuration!: number;
   public status!: RouteStatus;
   public totalStops!: number;
@@ -69,7 +73,7 @@ class Route
 }
 
 // ============================================
-// INITIALIZATION
+// MODEL INITIALIZATION
 // ============================================
 Route.init(
   {
@@ -88,7 +92,7 @@ Route.init(
       onDelete: 'CASCADE',
     },
     zone: {
-      type: DataTypes.STRING(20),
+      type: DataTypes.STRING(50),
       allowNull: false,
     },
     suburb: {
@@ -96,7 +100,7 @@ Route.init(
       allowNull: false,
     },
     scheduledDate: {
-      type: DataTypes.DATEONLY,
+      type: DataTypes.DATE,
       allowNull: false,
     },
     scheduledStart: {
@@ -107,10 +111,20 @@ Route.init(
       type: DataTypes.DATE,
       allowNull: false,
     },
+    // ✅ NEW: Actual start time (set when first stop is completed)
+    actualStart: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+    // ✅ NEW: Actual end time (set when all stops are handled)
+    actualEnd: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
     estimatedDuration: {
       type: DataTypes.INTEGER,
       allowNull: false,
-      defaultValue: 480, // 8 hours default
+      defaultValue: 480,
     },
     status: {
       type: DataTypes.ENUM(...Object.values(RouteStatus)),
@@ -148,6 +162,8 @@ Route.init(
 // ============================================
 // ASSOCIATIONS
 // ============================================
+import Truck from './Truck';
+
 Truck.hasMany(Route, {
   foreignKey: 'truckId',
   as: 'routes',

@@ -52,27 +52,31 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ============================================
+// ✅ DISABLE CACHING FOR ALL API RESPONSES
+// ============================================
+app.use((req, res, next) => {
+  res.setHeader(
+    'Cache-Control',
+    'no-store, no-cache, must-revalidate, proxy-revalidate'
+  );
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
+  next();
+});
+
+// ============================================
 // ROUTES
 // ============================================
-
-// Apply general rate limit to all API routes
 app.use('/api', apiLimiter);
 
-// Auth routes
 app.use('/api/auth', authRoutes);
-// Report routes
 app.use('/api/reports', reportRoutes);
-// Truck routes
 app.use('/api/trucks', truckRoutes);
-// KPI routes
 app.use('/api/kpis', kpiRoutes);
-// Schedule routes
 app.use('/api/schedules', scheduleRoutes);
-// Route routes
 app.use('/api/routes', routeRoutes);
-// Upload routes
 app.use('/api/upload', uploadRoutes);
-// User routes
 app.use('/api/users', userRoutes);
 
 // Health check
@@ -122,6 +126,22 @@ app.use((req, res) => {
 // ============================================
 const startServer = async () => {
   try {
+    // ✅ WARM UP THE CONNECTION POOL BEFORE ACCEPTING REQUESTS
+    // This forces Sequelize to open all pool connections eagerly,
+    // so the first real request doesn't pay the SSL handshake cost.
+    console.log('🔥 Warming up database connection pool...');
+    const warmupStart = Date.now();
+
+    await Promise.all([
+      sequelize.query('SELECT 1'),
+      sequelize.query('SELECT 1'),
+      sequelize.query('SELECT 1'),
+      sequelize.query('SELECT 1'),
+      sequelize.query('SELECT 1'),
+    ]);
+
+    console.log(`✅ Pool warmed up in ${Date.now() - warmupStart}ms`);
+
     await sequelize.authenticate();
     console.log('✅ Database connection established successfully');
 

@@ -28,8 +28,7 @@ export type ZoneName =
   | 'Zone 6'
   | 'Zone 7'
   | 'Zone 8'
-  | 'Zone 9'
-  | 'Zone 10';
+  | 'Zone 9';
 
 export interface ZoneConfig {
   name: ZoneName;
@@ -41,78 +40,124 @@ export const ZONES: Record<ZoneName, ZoneConfig> = {
   'Zone 1': {
     name: 'Zone 1',
     electorate: 'Moresby North-East',
-    suburbs: ['Boroko', '5 Mile', '6 Mile'],
+    suburbs: ['5 Mile', '6 Mile', 'Boroko'],
   },
   'Zone 2': {
     name: 'Zone 2',
     electorate: 'Moresby North-East',
-    suburbs: ['Gordons', 'Gordons North', 'Erima'],
+    suburbs: ['Erima', 'Gordons'],
   },
   'Zone 3': {
     name: 'Zone 3',
     electorate: 'Moresby North-East',
-    suburbs: ['7 Mile', '8 Mile', '9 Mile'],
+    suburbs: ['7 Mile', '8 Mile', '9 Mile', 'Bomana'],
   },
   'Zone 4': {
     name: 'Zone 4',
-    electorate: 'Moresby North-East',
-    suburbs: ['Bomana', '14 Mile PAU'],
+    electorate: 'Moresby North-West',
+    suburbs: ['Gerehu', 'Morata', 'Waigani'],
   },
   'Zone 5': {
     name: 'Zone 5',
     electorate: 'Moresby North-West',
-    suburbs: ['Gerehu', 'Morata', 'Waigani'],
+    suburbs: ['Hohola', 'Tokarara'],
   },
   'Zone 6': {
     name: 'Zone 6',
-    electorate: 'Moresby North-West',
-    suburbs: ['Tokarara', 'Hohola'],
+    electorate: 'Moresby South',
+    suburbs: ['Badili', 'Koki', 'Konedobu'],
   },
   'Zone 7': {
     name: 'Zone 7',
     electorate: 'Moresby South',
-    suburbs: ['Konedobu', 'Koki', 'Badili'],
+    suburbs: ['4 Mile', 'Murray Barracks', '3 Mile'],
   },
   'Zone 8': {
     name: 'Zone 8',
     electorate: 'Moresby South',
-    suburbs: ['Murray Barracks', 'Three Mile', '4 Mile'],
+    suburbs: ['Gabutu', 'Korobosea'],
   },
   'Zone 9': {
     name: 'Zone 9',
     electorate: 'Moresby South',
-    suburbs: ['Korobosea', 'Gabutu'],
-  },
-  'Zone 10': {
-    name: 'Zone 10',
-    electorate: 'Moresby South',
-    suburbs: ['Sabama', 'Kila Kila', 'Taurama'],
+    suburbs: ['Sabama', 'Taurama'],
   },
 };
 
 export const ZONE_NAMES: ZoneName[] = Object.keys(ZONES) as ZoneName[];
 
 // ============================================
-// ELECTROATE → ZONES MAPPING
+// ELECTORATE → ZONES MAPPING
 // ============================================
 export const ELECTORATE_ZONES: Record<Electorate, ZoneName[]> = {
-  'Moresby North-East': ['Zone 1', 'Zone 2', 'Zone 3', 'Zone 4'],
-  'Moresby North-West': ['Zone 5', 'Zone 6'],
-  'Moresby South': ['Zone 7', 'Zone 8', 'Zone 9', 'Zone 10'],
+  'Moresby North-East': ['Zone 1', 'Zone 2', 'Zone 3'],
+  'Moresby North-West': ['Zone 4', 'Zone 5'],
+  'Moresby South': ['Zone 6', 'Zone 7', 'Zone 8', 'Zone 9'],
 };
 
 // ============================================
-// TRUCK → ZONE ASSIGNMENTS
+// COLLECTION SCHEDULE BY ZONE
 // ============================================
-// North-East: 4 trucks (T-001 to T-004)
-// North-West: 3 trucks (T-005 to T-007)
-// South: 3 trucks (T-008 to T-010)
-//
-// South distribution:
-//   Truck 1 (T-008) → Zones 7 & 8
-//   Truck 2 (T-009) → Zone 9
-//   Truck 3 (T-010) → Zone 10
+export type DayOfWeek =
+  | 'monday'
+  | 'tuesday'
+  | 'wednesday'
+  | 'thursday'
+  | 'friday'
+  | 'saturday'
+  | 'sunday';
 
+export const ZONE_SCHEDULES: Record<ZoneName, DayOfWeek[]> = {
+  'Zone 1': ['monday', 'wednesday', 'friday'],
+  'Zone 2': ['monday', 'wednesday', 'friday'],
+  'Zone 3': ['tuesday', 'thursday', 'saturday'],
+  'Zone 4': ['monday', 'wednesday', 'friday'],
+  'Zone 5': ['tuesday', 'thursday', 'saturday'],
+  'Zone 6': ['monday', 'wednesday', 'friday'],
+  'Zone 7': ['monday', 'wednesday', 'friday'],
+  'Zone 8': ['tuesday', 'thursday', 'saturday'],
+  'Zone 9': ['tuesday', 'thursday', 'saturday'],
+};
+
+// ============================================
+// HELPER: Get working days for a given zone
+// ============================================
+export const getWorkingDaysForZone = (zone: string): DayOfWeek[] => {
+  return ZONE_SCHEDULES[zone as ZoneName] || [];
+};
+
+// ============================================
+// HELPER: Check if a date is a working day for a zone
+// ============================================
+export const isWorkingDayForZone = (date: Date, zone: string): boolean => {
+  const workingDays = getWorkingDaysForZone(zone);
+  if (workingDays.length === 0) return false;
+
+  const dayNames: DayOfWeek[] = [
+    'sunday',
+    'monday',
+    'tuesday',
+    'wednesday',
+    'thursday',
+    'friday',
+    'saturday',
+  ];
+  const dayOfWeek = dayNames[date.getDay()];
+
+  return workingDays.includes(dayOfWeek);
+};
+
+// ============================================
+// HELPER: Get friendly display of working days
+// ============================================
+export const getWorkingDaysLabel = (zone: string): string => {
+  const days = getWorkingDaysForZone(zone);
+  return days.map((d) => d.charAt(0).toUpperCase() + d.slice(1)).join(', ');
+};
+
+// ============================================
+// TRUCK → ZONE ASSIGNMENTS (9 zones, 9 trucks)
+// ============================================
 export const TRUCK_ZONE_ASSIGNMENTS = {
   'T-001': ['Zone 1'],
   'T-002': ['Zone 2'],
@@ -120,10 +165,9 @@ export const TRUCK_ZONE_ASSIGNMENTS = {
   'T-004': ['Zone 4'],
   'T-005': ['Zone 5'],
   'T-006': ['Zone 6'],
-  'T-007': ['Zone 5', 'Zone 6'], // 3rd NW truck — shared
-  'T-008': ['Zone 7', 'Zone 8'], // South truck 1
-  'T-009': ['Zone 9'],           // South truck 2
-  'T-010': ['Zone 10'],          // South truck 3
+  'T-007': ['Zone 7'],
+  'T-008': ['Zone 8'],
+  'T-009': ['Zone 9'],
 };
 
 // ============================================
@@ -139,7 +183,6 @@ export const PORT_MORESBY_BOUNDS = {
 // ============================================
 // VALIDATION HELPERS
 // ============================================
-
 export const isValidElectorate = (value: string): value is Electorate => {
   return ELECTORATES.includes(value as Electorate);
 };
