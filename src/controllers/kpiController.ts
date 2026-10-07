@@ -32,6 +32,7 @@ export const getDashboardData = async (req: AuthRequest, res: Response) => {
                 COUNT(CASE WHEN status = 'pending' THEN 1 END)::int AS pending_reports,
                 COUNT(CASE WHEN status = 'in-progress' THEN 1 END)::int AS in_progress_reports
               FROM reports
+              WHERE archived = false
               `,
               { type: QueryTypes.SELECT }
             ),
@@ -126,6 +127,7 @@ export const getDashboardData = async (req: AuthRequest, res: Response) => {
             t."registrationNumber",
             t.zone,
             t.status,
+            t."truckType",
             t.capacity,
             t."lastUpdate",
             t."driverId",
@@ -172,6 +174,7 @@ export const getDashboardData = async (req: AuthRequest, res: Response) => {
             driverName: row.driverName || 'Unassigned',
             zone: row.zone,
             status: row.status,
+            truckType: row.truckType || 'collection',
             completion: realCompletion,
             totalStops,
             completedStops,
@@ -330,6 +333,7 @@ export const getKPIs = async (req: AuthRequest, res: Response) => {
             COUNT(CASE WHEN status = 'pending' THEN 1 END)::int AS pending_reports,
             COUNT(CASE WHEN status = 'in-progress' THEN 1 END)::int AS in_progress_reports
           FROM reports
+          WHERE archived = false
           `,
           { type: QueryTypes.SELECT }
         ),
@@ -435,6 +439,7 @@ export const getFleetStatus = async (req: AuthRequest, res: Response) => {
         t."registrationNumber",
         t.zone,
         t.status,
+        t."truckType",
         t.capacity,
         t."lastUpdate",
         t."driverId",
@@ -481,6 +486,7 @@ export const getFleetStatus = async (req: AuthRequest, res: Response) => {
         driverName: row.driverName || 'Unassigned',
         zone: row.zone,
         status: row.status,
+        truckType: row.truckType || 'collection',
         completion: realCompletion,
         totalStops,
         completedStops,
@@ -624,14 +630,15 @@ export const getRoutePerformance = async (req: AuthRequest, res: Response) => {
 // Since routes are PERMANENT (fixed by zone + day), this does NOT delete
 // routes. Instead, it resets all route progress and stop statuses so the
 // same routes can be re-run for the next week.
+//
+// ✅ REVISED: Reports are ARCHIVED (not deleted). This hides them from the
+// Admin Complaint tab while preserving them in the Citizen's "My Reports".
 // ============================================
 export const resetWeekData = async (req: AuthRequest, res: Response) => {
   try {
     console.log('🔄 Resetting all routes + stops for a fresh week...');
 
     // 1. Reset all stops back to pending
-    //    - status → 'pending'
-    //    - completedAt, skippedReason, beforePhoto, afterPhoto, notes → NULL
     const stopResult: unknown = await sequelize.query(
       `
       UPDATE route_stops
@@ -651,9 +658,6 @@ export const resetWeekData = async (req: AuthRequest, res: Response) => {
     }
 
     // 2. Reset all routes back to pending
-    //    - status → 'pending'
-    //    - completedStops → 0
-    //    - actualStart, actualEnd → NULL
     const routeResult: unknown = await sequelize.query(
       `
       UPDATE routes
@@ -670,8 +674,7 @@ export const resetWeekData = async (req: AuthRequest, res: Response) => {
       resetRoutes = routeResult[1];
     }
 
-    // 3. Reset all trucks: completion = 0, status = available
-    //    Preserve maintenance/offline statuses.
+    // 3. Reset all trucks (completion = 0, status = available)
     const truckResult: unknown = await sequelize.query(
       `
       UPDATE trucks
@@ -690,8 +693,28 @@ export const resetWeekData = async (req: AuthRequest, res: Response) => {
       resetTrucks = truckResult[1];
     }
 
+    // ✅ REVISED: Archive complaint records from this week (do NOT delete)
+    // Archived reports are hidden from the Admin Complaint tab but still
+    // visible in the Citizen's "My Reports" page for their own tracking.
+    const complaintResult: unknown = await sequelize.query(
+      `
+      UPDATE reports
+      SET archived = true
+      WHERE "createdAt" >= NOW() - INTERVAL '7 days'
+        AND archived = false
+      `,
+      { type: QueryTypes.UPDATE }
+    );
+    let archivedComplaints = 0;
+    if (
+      Array.isArray(complaintResult) &&
+      typeof complaintResult[1] === 'number'
+    ) {
+      archivedComplaints = complaintResult[1];
+    }
+
     console.log(
-      `✅ Reset complete: ${resetStops} stops, ${resetRoutes} routes, ${resetTrucks} trucks`
+      `✅ Reset complete: ${resetStops} stops, ${resetRoutes} routes, ${resetTrucks} trucks, ${archivedComplaints} complaints archived`
     );
 
     res.json({
@@ -701,6 +724,7 @@ export const resetWeekData = async (req: AuthRequest, res: Response) => {
         stops: resetStops,
         routes: resetRoutes,
         trucks: resetTrucks,
+        complaints: archivedComplaints,
       },
     });
   } catch (error: any) {

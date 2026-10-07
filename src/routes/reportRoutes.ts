@@ -13,7 +13,9 @@ import {
   getReportComments,
   addReportComment,
   deleteReportComment,
-  assignTruckToComplaint, // ADDED
+  assignTruckToComplaint,
+   respondToReport,              // ✅ ADD
+  getMyEmergencyResponses,      // ✅ ADD // ADDED
 } from '../controllers/reportController';
 import { authenticate, authorize } from '../middleware/auth';
 import { UserRole } from '../models/User';
@@ -53,6 +55,20 @@ router.get(
 // CREATE
 // ============================================
 router.post('/', createReport);
+
+// GET /api/reports/my-emergency-responses — driver's responded alerts
+router.get(
+  '/my-emergency-responses',
+  authorize(UserRole.DRIVER),
+  getMyEmergencyResponses
+);
+
+// POST /api/reports/:id/respond — admin responds to a report/alert
+router.post(
+  '/:id/respond',
+  authorize(UserRole.ADMIN, UserRole.MANAGEMENT),
+  respondToReport
+);
 
 // ============================================
 // SPECIFIC RESOURCE ROUTES

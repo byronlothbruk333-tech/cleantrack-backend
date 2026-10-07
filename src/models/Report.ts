@@ -35,7 +35,7 @@ interface ReportAttributes {
   issueType: IssueType;
   description: string;
   address: string;
-  zone?: string | null; // ADDED
+  zone?: string | null;
   latitude?: number | null;
   longitude?: number | null;
   photos: string[];
@@ -46,6 +46,11 @@ interface ReportAttributes {
   contactName?: string | null;
   contactPhone?: string | null;
   contactEmail?: string | null;
+  adminResponse?: string | null;
+  adminRespondedAt?: Date | null;
+  adminRespondedBy?: string | null;
+  // ✅ NEW: archived flag — hides from Admin Complaint tab but not from Citizen view
+  archived: boolean;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -54,7 +59,7 @@ interface ReportCreationAttributes
   extends Optional<
     ReportAttributes,
     | 'id'
-    | 'zone' // ADDED
+    | 'zone'
     | 'latitude'
     | 'longitude'
     | 'photos'
@@ -65,6 +70,10 @@ interface ReportCreationAttributes
     | 'contactName'
     | 'contactPhone'
     | 'contactEmail'
+    | 'adminResponse'
+    | 'adminRespondedAt'
+    | 'adminRespondedBy'
+    | 'archived' // ✅ NEW
     | 'createdAt'
     | 'updatedAt'
   > {}
@@ -81,7 +90,7 @@ class Report
   public issueType!: IssueType;
   public description!: string;
   public address!: string;
-  public zone?: string | null; // ADDED
+  public zone?: string | null;
   public latitude?: number | null;
   public longitude?: number | null;
   public photos!: string[];
@@ -92,6 +101,11 @@ class Report
   public contactName?: string | null;
   public contactPhone?: string | null;
   public contactEmail?: string | null;
+  public adminResponse?: string | null;
+  public adminRespondedAt?: Date | null;
+  public adminRespondedBy?: string | null;
+  // ✅ NEW
+  public archived!: boolean;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 }
@@ -124,7 +138,6 @@ Report.init(
       type: DataTypes.STRING(255),
       allowNull: false,
     },
-    // ADDED
     zone: {
       type: DataTypes.STRING(50),
       allowNull: true,
@@ -174,6 +187,29 @@ Report.init(
       type: DataTypes.STRING(150),
       allowNull: true,
     },
+    adminResponse: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+    adminRespondedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+    adminRespondedBy: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      references: {
+        model: 'users',
+        key: 'id',
+      },
+      onDelete: 'SET NULL',
+    },
+    // ✅ NEW: archived column
+    archived: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
   },
   {
     sequelize,
@@ -184,7 +220,8 @@ Report.init(
       { fields: ['status'] },
       { fields: ['priority'] },
       { fields: ['issueType'] },
-      { fields: ['zone'] }, // ADDED for faster zone filtering
+      { fields: ['zone'] },
+      { fields: ['archived'] }, // ✅ NEW index
       { fields: ['createdAt'] },
     ],
   }

@@ -11,6 +11,11 @@ export enum TruckStatus {
   MAINTENANCE = 'maintenance',
   OFFLINE = 'offline',
 }
+// ✅ NEW
+export enum TruckType {
+  COLLECTION = 'collection',
+  RESPONSE_UNIT = 'response-unit',
+}
 
 // ============================================
 // ATTRIBUTES INTERFACE
@@ -22,6 +27,7 @@ interface TruckAttributes {
   driverId?: string | null;
   zone: string;
   status: TruckStatus;
+  truckType: TruckType; // ✅ NEW
   completion: number;
   capacity: number;
   latitude?: number | null;
@@ -39,6 +45,7 @@ interface TruckCreationAttributes
     | 'id'
     | 'driverId'
     | 'status'
+    | 'truckType' // ✅ NEW
     | 'completion'
     | 'latitude'
     | 'longitude'
@@ -60,6 +67,7 @@ class Truck
   public driverId?: string | null;
   public zone!: string;
   public status!: TruckStatus;
+  public truckType!: TruckType; // ✅ NEW
   public completion!: number;
   public capacity!: number;
   public latitude?: number | null;
@@ -108,6 +116,12 @@ Truck.init(
       type: DataTypes.ENUM(...Object.values(TruckStatus)),
       allowNull: false,
       defaultValue: TruckStatus.OFFLINE,
+    },
+    // ✅ NEW
+    truckType: {
+      type: DataTypes.ENUM(...Object.values(TruckType)),
+      allowNull: false,
+      defaultValue: TruckType.COLLECTION,
     },
     completion: {
       type: DataTypes.INTEGER,
@@ -158,6 +172,7 @@ Truck.init(
       { fields: ['driverId'] },
       { fields: ['zone'] },
       { fields: ['status'] },
+      { fields: ['truckType'] }, // ✅ NEW
     ],
   }
 );
@@ -176,7 +191,4 @@ Truck.belongsTo(User, {
   as: 'driver',
 });
 
-// ============================================
-// DEFAULT EXPORT (CRITICAL)
-// ============================================
 export default Truck;

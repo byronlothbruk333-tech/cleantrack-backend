@@ -4,6 +4,7 @@ import Route, { RouteStatus } from '../models/Route';
 import RouteStop, { StopStatus, ComplaintType } from '../models/RouteStop';
 import Truck, { TruckStatus } from '../models/Truck';
 import Report from '../models/Report';
+import ReportComment from '../models/ReportComment';
 import User from '../models/User';
 import { AuthRequest } from '../middleware/auth';
 import {
@@ -172,7 +173,6 @@ export const createRoute = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    // ✅ VALIDATE: Check if scheduled date is a collection day for the zone
     const scheduledDateObj = new Date(scheduledDate);
 
     if (!isWorkingDayForZone(scheduledDateObj, zone)) {
@@ -291,6 +291,7 @@ export const createRoute = async (req: AuthRequest, res: Response) => {
 
 // ============================================
 // GET TODAY'S ROUTE (for driver)
+// ✅ IMPROVEMENT 3: Attaches reportComments AND reportPhotos to complaint stops
 // ============================================
 export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
   try {
@@ -324,7 +325,23 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
-    const route = await Route.findOne({
+    const includeArray: any[] = [
+      {
+        model: Truck,
+        as: 'truck',
+        include: [
+          { model: User, as: 'driver', attributes: ['id', 'name', 'email'] },
+        ],
+      },
+      {
+        model: RouteStop,
+        as: 'stops',
+        separate: true,
+        order: [['sequence', 'ASC']],
+      },
+    ];
+
+    let route = await Route.findOne({
       where: {
         truckId: truck.id,
         scheduledDate: {
@@ -332,19 +349,7 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
           [Op.lt]: tomorrow,
         },
       },
-      include: [
-        {
-          model: Truck,
-          as: 'truck',
-          include: [{ model: User, as: 'driver', attributes: ['id', 'name', 'email'] }],
-        },
-        {
-          model: RouteStop,
-          as: 'stops',
-          separate: true,
-          order: [['sequence', 'ASC']],
-        },
-      ],
+      include: includeArray,
     });
 
     if (!route) {
@@ -352,35 +357,92 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
         `No route scheduled for today for truck ${truck.truckId}. Fetching latest route...`
       );
 
-      const latestRoute = await Route.findOne({
+      route = await Route.findOne({
         where: { truckId: truck.id },
         order: [['scheduledDate', 'DESC']],
-        include: [
-          {
-            model: Truck,
-            as: 'truck',
-            include: [{ model: User, as: 'driver', attributes: ['id', 'name', 'email'] }],
-          },
-          {
-            model: RouteStop,
-            as: 'stops',
-            separate: true,
-            order: [['sequence', 'ASC']],
-          },
-        ],
+        include: includeArray,
       });
 
-      if (!latestRoute) {
+      if (!route) {
         return res.status(404).json({
           error: 'No route scheduled',
           message: 'You do not have any routes scheduled',
         });
       }
-
-      return res.json({ route: latestRoute });
     }
 
-    res.json({ route });
+    // ✅ Attach comments + photos to complaint stops
+    const routeJson = route.toJSON() as any;
+    const complaintStops = (routeJson.stops || []).filter(
+      (s: any) => s.isComplaintStop && s.reportId
+    );
+
+    if (complaintStops.length > 0) {
+      const reportIds = complaintStops.map((s: any) => s.reportId);
+
+      // Fetch public comments
+      const comments = await ReportComment.findAll({
+        where: {
+          reportId: { [Op.in]: reportIds },
+          isInternal: false,
+        },
+        include: [
+          {
+            model: User,
+            as: 'author',
+            attributes: ['id', 'name', 'role'],
+          },
+        ],
+        order: [['createdAt', 'ASC']],
+      });
+
+      // Group comments by reportId
+      const commentsByReport: Record<string, any[]> = {};
+      comments.forEach((c: any) => {
+        const cj = c.toJSON();
+        if (!commentsByReport[cj.reportId]) commentsByReport[cj.reportId] = [];
+        commentsByReport[cj.reportId].push({
+          id: cj.id,
+          content: cj.content,
+          createdAt: cj.createdAt,
+          authorName: cj.author?.name || 'Admin',
+          authorRole: cj.author?.role || 'admin',
+        });
+      });
+
+      // ✅ Fetch photos + adminResponse from linked reports
+      const reports = await Report.findAll({
+        where: { id: { [Op.in]: reportIds } },
+        attributes: ['id', 'photos', 'adminResponse', 'adminRespondedAt'],
+      });
+
+      const reportsById: Record<string, any> = {};
+      reports.forEach((r: any) => {
+        const rj = r.toJSON();
+        reportsById[rj.id] = {
+          photos: rj.photos || [],
+          adminResponse: rj.adminResponse || null,
+          adminRespondedAt: rj.adminRespondedAt || null,
+        };
+      });
+
+      // Attach everything to complaint stops
+      routeJson.stops = routeJson.stops.map((s: any) => {
+        if (s.isComplaintStop && s.reportId) {
+          const reportData = reportsById[s.reportId] || {};
+          return {
+            ...s,
+            reportComments: commentsByReport[s.reportId] || [],
+            reportPhotos: reportData.photos || [],
+            reportAdminResponse: reportData.adminResponse || null,
+            reportAdminRespondedAt: reportData.adminRespondedAt || null,
+          };
+        }
+        return s;
+      });
+    }
+
+    res.json({ route: routeJson });
   } catch (error: any) {
     handleError(res, error, "Failed to fetch today's route");
   }
@@ -659,7 +721,6 @@ export const getRouteStats = async (req: AuthRequest, res: Response) => {
 
 // ============================================
 // COMPLETE A STOP
-// AUTO-RECORDS actualStart (first stop) + actualEnd (last stop)
 // ============================================
 export const completeStop = async (req: AuthRequest, res: Response) => {
   try {
@@ -741,7 +802,6 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
 
     route.completedStops = completedCount;
 
-    // ✅ RECORD actualStart when the FIRST stop is handled
     if (!route.actualStart && handledCount > 0) {
       route.actualStart = new Date();
       console.log(
@@ -753,7 +813,6 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
 
     if (allStopsHandled) {
       route.status = RouteStatus.COMPLETED;
-      // ✅ RECORD actualEnd when ALL stops are handled
       if (!route.actualEnd) {
         route.actualEnd = new Date();
         console.log(
@@ -768,6 +827,7 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
 
     await updateTruckStatusFromRoute(route.id, completedCount, handledCount);
 
+    // ✅ IMPROVEMENT 4 + #4: Handle complaint stop completion + removal
     if (stop.isComplaintStop && stop.reportId) {
       const report = await Report.findByPk(stop.reportId);
       if (report && report.status !== 'resolved') {
@@ -775,6 +835,44 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
         report.resolvedAt = new Date();
         await report.save();
       }
+
+      // Remove the complaint stop from the route (they don't persist)
+      await stop.destroy();
+
+      // Recalculate route stats after removal
+      const newCompletedCount = await RouteStop.count({
+        where: { routeId: route.id, status: StopStatus.COMPLETED },
+      });
+      const newHandledCount = await RouteStop.count({
+        where: {
+          routeId: route.id,
+          status: { [Op.in]: [StopStatus.COMPLETED, StopStatus.SKIPPED] },
+        },
+      });
+
+      route.totalStops = Math.max(0, route.totalStops - 1);
+      route.completedStops = newCompletedCount;
+
+      if (route.totalStops === 0 || newHandledCount >= route.totalStops) {
+        route.status = RouteStatus.COMPLETED;
+        if (!route.actualEnd) route.actualEnd = new Date();
+      }
+
+      await route.save();
+
+      return res.json({
+        message: 'Complaint stop completed and removed from route',
+        stop: null,
+        routeProgress: {
+          completedStops: route.completedStops,
+          totalStops: route.totalStops,
+          progressPercent:
+            route.totalStops > 0
+              ? Math.round((newCompletedCount / route.totalStops) * 100)
+              : 100,
+          routeStatus: route.status,
+        },
+      });
     }
 
     const updatedStop = await RouteStop.findByPk(stop.id);
@@ -799,7 +897,6 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
 
 // ============================================
 // SKIP A STOP
-// AUTO-RECORDS actualStart (first stop) + actualEnd (last stop)
 // ============================================
 export const skipStop = async (req: AuthRequest, res: Response) => {
   try {
@@ -881,7 +978,6 @@ export const skipStop = async (req: AuthRequest, res: Response) => {
       },
     });
 
-    // ✅ RECORD actualStart when the FIRST stop is handled (completed OR skipped)
     if (!route.actualStart && handledCount > 0) {
       route.actualStart = new Date();
       console.log(
@@ -893,7 +989,6 @@ export const skipStop = async (req: AuthRequest, res: Response) => {
 
     if (allStopsHandled) {
       route.status = RouteStatus.COMPLETED;
-      // ✅ RECORD actualEnd when ALL stops are handled
       if (!route.actualEnd) {
         route.actualEnd = new Date();
         console.log(

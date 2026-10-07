@@ -7,12 +7,59 @@ import Route, { RouteStatus } from '../models/Route';
 import RouteStop, { StopStatus } from '../models/RouteStop';
 import { AuthRequest } from '../middleware/auth';
 import ReportComment from '../models/ReportComment';
-import { ZoneName } from '../constants/portMoresbyZones'; // <-- ADDED
+import { ZoneName } from '../constants/portMoresbyZones';
+
+// ============================================
+// HELPER: Enrich reports with completion proof
+// ============================================
+const enrichReportsWithCompletionProof = async (reports: any[]) => {
+  if (!reports || reports.length === 0) return reports;
+
+  const reportIds = reports.map((r) => r.id);
+
+  const stops = await RouteStop.findAll({
+    where: {
+      reportId: { [Op.in]: reportIds },
+      isComplaintStop: true,
+    },
+    attributes: [
+      'id',
+      'reportId',
+      'beforePhoto',
+      'afterPhoto',
+      'completedAt',
+      'status',
+    ],
+  });
+
+  const proofByReport: Record<
+    string,
+    {
+      beforePhoto: string | null;
+      afterPhoto: string | null;
+      completedAt: Date | null;
+    }
+  > = {};
+
+  stops.forEach((stop: any) => {
+    const sj = stop.toJSON();
+    if (sj.reportId) {
+      proofByReport[sj.reportId] = {
+        beforePhoto: sj.beforePhoto || null,
+        afterPhoto: sj.afterPhoto || null,
+        completedAt: sj.completedAt || null,
+      };
+    }
+  });
+
+  return reports.map((r) => ({
+    ...(r.toJSON ? r.toJSON() : r),
+    completionProof: proofByReport[r.id] || null,
+  }));
+};
 
 // ============================================
 // CREATE REPORT
-// POST /api/reports
-// Requires: authenticate (citizen)
 // ============================================
 export const createReport = async (req: AuthRequest, res: Response) => {
   try {
@@ -45,6 +92,20 @@ export const createReport = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({
         error: 'Invalid issue type',
         message: `issueType must be one of: ${allowedIssueTypes.join(', ')}`,
+      });
+    }
+
+    // ✅ Photos required EXCEPT for emergency alerts
+    const isEmergencyAlert = description?.startsWith('[🚨 DRIVER EMERGENCY]');
+
+    if (
+      !isEmergencyAlert &&
+      (!photos || !Array.isArray(photos) || photos.length === 0)
+    ) {
+      return res.status(400).json({
+        error: 'Photos required',
+        message:
+          'At least one photo is required as evidence of the issue. Please attach a photo and try again.',
       });
     }
 
@@ -81,15 +142,17 @@ export const createReport = async (req: AuthRequest, res: Response) => {
     console.error('Create report error:', error);
     res.status(500).json({
       error: 'Failed to create report',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
     });
   }
 };
 
 // ============================================
-// GET MY REPORTS
-// GET /api/reports/my
-// Requires: authenticate (citizen)
+// GET MY REPORTS (Citizen view)
+// ✅ Shows ALL reports including archived ones
 // ============================================
 export const getMyReports = async (req: AuthRequest, res: Response) => {
   try {
@@ -102,20 +165,68 @@ export const getMyReports = async (req: AuthRequest, res: Response) => {
       order: [['createdAt', 'DESC']],
     });
 
-    res.json({ count: reports.length, reports });
+    const reportIds = reports.map((r) => r.id);
+
+    let commentsByReport: Record<string, any[]> = {};
+
+    if (reportIds.length > 0) {
+      const comments = await ReportComment.findAll({
+        where: {
+          reportId: { [Op.in]: reportIds },
+          isInternal: false,
+        },
+        include: [
+          {
+            model: User,
+            as: 'author',
+            attributes: ['id', 'name', 'role'],
+          },
+        ],
+        order: [['createdAt', 'ASC']],
+      });
+
+      commentsByReport = comments.reduce((acc: any, comment: any) => {
+        const c = comment.toJSON();
+        if (!acc[c.reportId]) acc[c.reportId] = [];
+        acc[c.reportId].push({
+          id: c.id,
+          content: c.content,
+          createdAt: c.createdAt,
+          authorName: c.author?.name || 'Admin',
+          authorRole: c.author?.role || 'admin',
+        });
+        return acc;
+      }, {});
+    }
+
+    const reportsWithComments = reports.map((r) => ({
+      ...r.toJSON(),
+      adminComments: commentsByReport[r.id] || [],
+    }));
+
+    const enriched = await enrichReportsWithCompletionProof(
+      reportsWithComments
+    );
+
+    res.json({
+      count: enriched.length,
+      reports: enriched,
+    });
   } catch (error: any) {
     console.error('Get my reports error:', error);
     res.status(500).json({
       error: 'Failed to fetch reports',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
     });
   }
 };
 
 // ============================================
-// GET ALL REPORTS
-// GET /api/reports
-// Requires: authenticate + authorize(admin, management)
+// GET ALL REPORTS (Admin view)
+// ✅ Hides archived reports from the Admin Complaint tab
 // ============================================
 export const getAllReports = async (req: AuthRequest, res: Response) => {
   try {
@@ -128,7 +239,8 @@ export const getAllReports = async (req: AuthRequest, res: Response) => {
       offset = '0',
     } = req.query;
 
-    const where: any = {};
+    // ✅ Filter out archived reports by default
+    const where: any = { archived: false };
     if (status) where.status = status;
     if (priority) where.priority = priority;
     if (issueType) where.issueType = issueType;
@@ -148,17 +260,60 @@ export const getAllReports = async (req: AuthRequest, res: Response) => {
       offset: parseInt(offset as string),
     });
 
+    const enrichedReports = await Promise.all(
+      reports.map(async (report) => {
+        const reportJson = report.toJSON();
+
+        const stop = await RouteStop.findOne({
+          where: { reportId: report.id },
+          include: [
+            {
+              model: Route,
+              as: 'route',
+              include: [
+                {
+                  model: Truck,
+                  as: 'truck',
+                  attributes: ['id', 'truckId'],
+                  include: [
+                    {
+                      model: User,
+                      as: 'driver',
+                      attributes: ['id', 'name'],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        });
+
+        const stopJson = stop ? (stop.toJSON() as any) : null;
+
+        return {
+          ...reportJson,
+          assignedTruck: stopJson?.route?.truck?.truckId || null,
+          assignedDriver: stopJson?.route?.truck?.driver?.name || null,
+        };
+      })
+    );
+
+    const withProof = await enrichReportsWithCompletionProof(enrichedReports);
+
     res.json({
       total: count,
       limit: parseInt(limit as string),
       offset: parseInt(offset as string),
-      reports,
+      reports: withProof,
     });
   } catch (error: any) {
     console.error('Get all reports error:', error);
     res.status(500).json({
       error: 'Failed to fetch reports',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
     });
   }
 };
@@ -186,19 +341,38 @@ export const getReportById = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    if (req.user.role === 'citizen' && report.citizenId !== req.user.id) {
+    const isAuthor = report.citizenId === req.user.id;
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'management';
+    const isAssignedDriver =
+      req.user.role === 'driver' && report.assignedTo === req.user.id;
+
+    if (!isAuthor && !isAdmin && !isAssignedDriver) {
       return res.status(403).json({
         error: 'Access denied',
-        message: 'You can only view your own reports',
+        message: 'You do not have access to this report',
       });
     }
 
-    res.json({ report });
+    const reportJson = report.toJSON() as any;
+
+    // Strip adminResponse if viewer is not author or admin
+    if (!isAuthor && !isAdmin) {
+      delete reportJson.adminResponse;
+      delete reportJson.adminRespondedAt;
+      delete reportJson.adminRespondedBy;
+    }
+
+    const [withProof] = await enrichReportsWithCompletionProof([reportJson]);
+
+    res.json({ report: withProof });
   } catch (error: any) {
     console.error('Get report by id error:', error);
     res.status(500).json({
       error: 'Failed to fetch report',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
     });
   }
 };
@@ -252,7 +426,10 @@ export const updateReportStatus = async (req: AuthRequest, res: Response) => {
     console.error('Update report status error:', error);
     res.status(500).json({
       error: 'Failed to update report',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
     });
   }
 };
@@ -288,7 +465,15 @@ export const updateReport = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { description, address, latitude, longitude, photos, issueType, zone } = req.body;
+    const {
+      description,
+      address,
+      latitude,
+      longitude,
+      photos,
+      issueType,
+      zone,
+    } = req.body;
 
     if (description !== undefined) report.description = description;
     if (address !== undefined) report.address = address;
@@ -305,7 +490,10 @@ export const updateReport = async (req: AuthRequest, res: Response) => {
     console.error('Update report error:', error);
     res.status(500).json({
       error: 'Failed to update report',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
     });
   }
 };
@@ -347,7 +535,10 @@ export const deleteReport = async (req: AuthRequest, res: Response) => {
     console.error('Delete report error:', error);
     res.status(500).json({
       error: 'Failed to delete report',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
     });
   }
 };
@@ -369,9 +560,12 @@ export const getReportStats = async (req: AuthRequest, res: Response) => {
     const stats = {
       total: reports.length,
       pending: reports.filter((r) => r.status === ReportStatus.PENDING).length,
-      inProgress: reports.filter((r) => r.status === ReportStatus.IN_PROGRESS).length,
-      resolved: reports.filter((r) => r.status === ReportStatus.RESOLVED).length,
-      rejected: reports.filter((r) => r.status === ReportStatus.REJECTED).length,
+      inProgress: reports.filter((r) => r.status === ReportStatus.IN_PROGRESS)
+        .length,
+      resolved: reports.filter((r) => r.status === ReportStatus.RESOLVED)
+        .length,
+      rejected: reports.filter((r) => r.status === ReportStatus.REJECTED)
+        .length,
     };
 
     res.json({ stats });
@@ -379,7 +573,10 @@ export const getReportStats = async (req: AuthRequest, res: Response) => {
     console.error('Get report stats error:', error);
     res.status(500).json({
       error: 'Failed to fetch stats',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
     });
   }
 };
@@ -394,9 +591,12 @@ export const getReportCounts = async (req: AuthRequest, res: Response) => {
     const counts = {
       total: reports.length,
       pending: reports.filter((r) => r.status === ReportStatus.PENDING).length,
-      inProgress: reports.filter((r) => r.status === ReportStatus.IN_PROGRESS).length,
-      resolved: reports.filter((r) => r.status === ReportStatus.RESOLVED).length,
-      rejected: reports.filter((r) => r.status === ReportStatus.REJECTED).length,
+      inProgress: reports.filter((r) => r.status === ReportStatus.IN_PROGRESS)
+        .length,
+      resolved: reports.filter((r) => r.status === ReportStatus.RESOLVED)
+        .length,
+      rejected: reports.filter((r) => r.status === ReportStatus.REJECTED)
+        .length,
     };
 
     res.json({ counts });
@@ -404,7 +604,10 @@ export const getReportCounts = async (req: AuthRequest, res: Response) => {
     console.error('Get report counts error:', error);
     res.status(500).json({
       error: 'Failed to fetch counts',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
     });
   }
 };
@@ -434,7 +637,10 @@ export const getReportsByCitizen = async (req: AuthRequest, res: Response) => {
     console.error('Get reports by citizen error:', error);
     res.status(500).json({
       error: 'Failed to fetch reports',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
     });
   }
 };
@@ -484,7 +690,10 @@ export const getReportComments = async (req: AuthRequest, res: Response) => {
     console.error('Get report comments error:', error);
     res.status(500).json({
       error: 'Failed to fetch comments',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
     });
   }
 };
@@ -551,7 +760,10 @@ export const addReportComment = async (req: AuthRequest, res: Response) => {
     console.error('Add report comment error:', error);
     res.status(500).json({
       error: 'Failed to add comment',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
     });
   }
 };
@@ -586,18 +798,21 @@ export const deleteReportComment = async (req: AuthRequest, res: Response) => {
     console.error('Delete report comment error:', error);
     res.status(500).json({
       error: 'Failed to delete comment',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
     });
   }
 };
 
 // ============================================
 // ASSIGN TRUCK TO COMPLAINT
-// POST /api/reports/:id/assign-truck
-// Requires: admin/management
-// Creates a new route (or adds a stop) for the specified truck
 // ============================================
-export const assignTruckToComplaint = async (req: AuthRequest, res: Response) => {
+export const assignTruckToComplaint = async (
+  req: AuthRequest,
+  res: Response
+) => {
   try {
     const { id } = req.params;
     const { truckId } = req.body;
@@ -609,7 +824,6 @@ export const assignTruckToComplaint = async (req: AuthRequest, res: Response) =>
       });
     }
 
-    // 1. Find the report
     const report = await Report.findByPk(id);
     if (!report) {
       return res.status(404).json({ error: 'Report not found' });
@@ -622,7 +836,6 @@ export const assignTruckToComplaint = async (req: AuthRequest, res: Response) =>
       });
     }
 
-    // 2. Find the truck
     const truck = await Truck.findByPk(truckId, {
       include: [{ model: User, as: 'driver' }],
     });
@@ -630,7 +843,6 @@ export const assignTruckToComplaint = async (req: AuthRequest, res: Response) =>
       return res.status(404).json({ error: 'Truck not found' });
     }
 
-    // 3. Look for an existing active route for this truck
     let route = await Route.findOne({
       where: {
         truckId: truck.id,
@@ -639,20 +851,18 @@ export const assignTruckToComplaint = async (req: AuthRequest, res: Response) =>
       order: [['scheduledDate', 'DESC']],
     });
 
-    // 4. If no active route, create a new one
     if (!route) {
       const start = new Date();
       start.setHours(8, 0, 0, 0);
       const end = new Date();
       end.setHours(16, 0, 0, 0);
 
-      // Cast report.zone to ZoneName for TypeScript
       const zoneToUse: ZoneName =
         (report.zone as ZoneName) || (truck.zone as ZoneName);
 
       route = await Route.create({
         truckId: truck.id,
-        zone: zoneToUse, // CAST FIXED HERE
+        zone: zoneToUse,
         suburb: report.address.split(',')[1]?.trim() || truck.zone,
         scheduledDate: new Date(),
         scheduledStart: start,
@@ -665,7 +875,6 @@ export const assignTruckToComplaint = async (req: AuthRequest, res: Response) =>
       });
     }
 
-    // 5. Add the report as a new stop on the route
     const maxSeq = (await RouteStop.max('sequence', {
       where: { routeId: route.id },
     })) as number | null;
@@ -677,19 +886,21 @@ export const assignTruckToComplaint = async (req: AuthRequest, res: Response) =>
       sequence: nextSeq,
       address: report.address,
       suburb: report.zone || truck.zone,
-      latitude: report.latitude ? parseFloat(report.latitude.toString()) : -9.4438,
-      longitude: report.longitude ? parseFloat(report.longitude.toString()) : 147.1803,
+      latitude: report.latitude
+        ? parseFloat(report.latitude.toString())
+        : -9.4438,
+      longitude: report.longitude
+        ? parseFloat(report.longitude.toString())
+        : 147.1803,
       status: StopStatus.PENDING,
       isComplaintStop: true,
       complaintType: report.issueType as any,
       reportId: report.id,
     });
 
-    // 6. Update the route's stop count
     route.totalStops += 1;
     await route.save();
 
-    // 7. Update the report status to in-progress and assign the truck's driver
     report.status = ReportStatus.IN_PROGRESS;
     if (truck.driverId) {
       report.assignedTo = truck.driverId;
@@ -706,7 +917,107 @@ export const assignTruckToComplaint = async (req: AuthRequest, res: Response) =>
     console.error('Assign truck error:', error);
     res.status(500).json({
       error: 'Failed to assign truck',
-      message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
+    });
+  }
+};
+
+// ============================================
+// ADMIN RESPONDS TO REPORT / EMERGENCY ALERT
+// POST /api/reports/:id/respond
+// ============================================
+export const respondToReport = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    const { response } = req.body;
+
+    if (!response || !response.trim()) {
+      return res.status(400).json({
+        error: 'Missing response',
+        message: 'A response message is required',
+      });
+    }
+
+    const report = await Report.findByPk(req.params.id);
+    if (!report) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    report.adminResponse = response.trim();
+    report.adminRespondedAt = new Date();
+    report.adminRespondedBy = req.user.id;
+
+    if (report.status === ReportStatus.PENDING) {
+      report.status = ReportStatus.IN_PROGRESS;
+    }
+
+    await report.save();
+
+    res.json({
+      message: 'Response sent successfully',
+      report,
+    });
+  } catch (error: any) {
+    console.error('Respond to report error:', error);
+    res.status(500).json({
+      error: 'Failed to send response',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
+    });
+  }
+};
+
+// ============================================
+// GET MY EMERGENCY RESPONSES (for driver)
+// GET /api/reports/my-emergency-responses
+// ============================================
+export const getMyEmergencyResponses = async (
+  req: AuthRequest,
+  res: Response
+) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    const reports = await Report.findAll({
+      where: {
+        citizenId: req.user.id,
+        description: { [Op.like]: '[🚨 DRIVER EMERGENCY]%' },
+        adminResponse: { [Op.not]: null },
+        status: { [Op.notIn]: [ReportStatus.RESOLVED, ReportStatus.REJECTED] },
+      },
+      order: [['adminRespondedAt', 'DESC']],
+      limit: 10,
+    });
+
+    res.json({
+      count: reports.length,
+      responses: reports.map((r) => ({
+        id: r.id,
+        emergencyType: r.description,
+        adminResponse: r.adminResponse,
+        respondedAt: r.adminRespondedAt,
+        createdAt: r.createdAt,
+        status: r.status,
+      })),
+    });
+  } catch (error: any) {
+    console.error('Get my emergency responses error:', error);
+    res.status(500).json({
+      error: 'Failed to fetch responses',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
     });
   }
 };
