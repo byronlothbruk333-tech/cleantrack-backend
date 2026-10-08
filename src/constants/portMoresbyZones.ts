@@ -115,8 +115,8 @@ export type DayOfWeek =
 
 export const ZONE_SCHEDULES: Record<ZoneName, DayOfWeek[]> = {
   'Zone 1': ['monday', 'wednesday', 'friday'],
-  'Zone 2': ['monday', 'wednesday', 'friday'],
-  'Zone 3': ['tuesday', 'thursday', 'saturday'],
+  'Zone 2': ['tuesday', 'thursday', 'saturday'],  // ✅ swapped
+  'Zone 3': ['monday', 'wednesday', 'friday'],    // ✅ swapped
   'Zone 4': ['monday', 'wednesday', 'friday'],
   'Zone 5': ['tuesday', 'thursday', 'saturday'],
   'Zone 6': ['monday', 'wednesday', 'friday'],
