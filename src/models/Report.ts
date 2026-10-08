@@ -49,7 +49,10 @@ interface ReportAttributes {
   adminResponse?: string | null;
   adminRespondedAt?: Date | null;
   adminRespondedBy?: string | null;
-  // ✅ NEW: archived flag — hides from Admin Complaint tab but not from Citizen view
+  // ✅ NEW: proof-of-service photo (driver's after photo, persisted)
+  proofPhoto?: string | null;
+  proofPhotoUploadedAt?: Date | null;
+  // ✅ NEW: archived flag
   archived: boolean;
   createdAt?: Date;
   updatedAt?: Date;
@@ -73,7 +76,9 @@ interface ReportCreationAttributes
     | 'adminResponse'
     | 'adminRespondedAt'
     | 'adminRespondedBy'
-    | 'archived' // ✅ NEW
+    | 'proofPhoto' // ✅ NEW
+    | 'proofPhotoUploadedAt' // ✅ NEW
+    | 'archived'
     | 'createdAt'
     | 'updatedAt'
   > {}
@@ -105,6 +110,8 @@ class Report
   public adminRespondedAt?: Date | null;
   public adminRespondedBy?: string | null;
   // ✅ NEW
+  public proofPhoto?: string | null;
+  public proofPhotoUploadedAt?: Date | null;
   public archived!: boolean;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
@@ -204,7 +211,15 @@ Report.init(
       },
       onDelete: 'SET NULL',
     },
-    // ✅ NEW: archived column
+    // ✅ NEW: proof-of-service photo (survives route-stop deletion)
+    proofPhoto: {
+      type: DataTypes.STRING(500),
+      allowNull: true,
+    },
+    proofPhotoUploadedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
     archived: {
       type: DataTypes.BOOLEAN,
       allowNull: false,
@@ -221,7 +236,7 @@ Report.init(
       { fields: ['priority'] },
       { fields: ['issueType'] },
       { fields: ['zone'] },
-      { fields: ['archived'] }, // ✅ NEW index
+      { fields: ['archived'] },
       { fields: ['createdAt'] },
     ],
   }

@@ -844,12 +844,27 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
 
     await updateTruckStatusFromRoute(route.id, completedCount, handledCount);
 
+    // ============================================
     // Handle complaint stop completion + removal
+    // ✅ NEW: persist the proof photo onto the Report
+    //    BEFORE destroying the RouteStop, so admin +
+    //    citizen can still see it after the stop is gone.
+    // ============================================
     if (stop.isComplaintStop && stop.reportId) {
       const report = await Report.findByPk(stop.reportId);
-      if (report && report.status !== 'resolved') {
-        report.status = 'resolved' as any;
-        report.resolvedAt = new Date();
+      if (report) {
+        // Persist the after photo as proof-of-service
+        if (afterPhoto) {
+          report.proofPhoto = afterPhoto;
+          report.proofPhotoUploadedAt = new Date();
+        }
+
+        // Flip status to resolved
+        if (report.status !== 'resolved') {
+          report.status = 'resolved' as any;
+          report.resolvedAt = new Date();
+        }
+
         await report.save();
       }
 
@@ -880,7 +895,6 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
       return res.json({
         message: 'Complaint stop completed and removed from route',
         stop: null,
-        // ✅ Signal to the frontend that the stop was removed from the route
         stopRemoved: true,
         routeProgress: {
           completedStops: route.completedStops,
@@ -899,7 +913,6 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
     res.json({
       message: 'Stop completed successfully',
       stop: updatedStop,
-      // ✅ Explicitly signal that the stop was NOT removed
       stopRemoved: false,
       routeProgress: {
         completedStops: route.completedStops,

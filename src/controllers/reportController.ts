@@ -11,12 +11,15 @@ import { ZoneName } from '../constants/portMoresbyZones';
 
 // ============================================
 // HELPER: Enrich reports with completion proof
+// ✅ Prefers Report.proofPhoto (persisted after stop deletion)
+// ✅ Falls back to an existing RouteStop for in-flight stops
 // ============================================
 const enrichReportsWithCompletionProof = async (reports: any[]) => {
   if (!reports || reports.length === 0) return reports;
 
   const reportIds = reports.map((r) => r.id);
 
+  // Pull any still-existing complaint RouteStops (haven't been completed yet)
   const stops = await RouteStop.findAll({
     where: {
       reportId: { [Op.in]: reportIds },
@@ -32,7 +35,7 @@ const enrichReportsWithCompletionProof = async (reports: any[]) => {
     ],
   });
 
-  const proofByReport: Record<
+  const stopProofByReport: Record<
     string,
     {
       beforePhoto: string | null;
@@ -44,7 +47,7 @@ const enrichReportsWithCompletionProof = async (reports: any[]) => {
   stops.forEach((stop: any) => {
     const sj = stop.toJSON();
     if (sj.reportId) {
-      proofByReport[sj.reportId] = {
+      stopProofByReport[sj.reportId] = {
         beforePhoto: sj.beforePhoto || null,
         afterPhoto: sj.afterPhoto || null,
         completedAt: sj.completedAt || null,
@@ -52,12 +55,40 @@ const enrichReportsWithCompletionProof = async (reports: any[]) => {
     }
   });
 
-  return reports.map((r) => ({
-    ...(r.toJSON ? r.toJSON() : r),
-    completionProof: proofByReport[r.id] || null,
-  }));
-};
+  return reports.map((r) => {
+    const reportJson = r.toJSON ? r.toJSON() : r;
 
+    // ✅ Prefer the report's own persisted proof photo
+    const hasReportProof = !!reportJson.proofPhoto;
+    const stopProof = stopProofByReport[reportJson.id] || null;
+
+    let completionProof:
+      | {
+          beforePhoto: string | null;
+          afterPhoto: string | null;
+          completedAt: Date | null;
+        }
+      | null = null;
+
+    if (hasReportProof) {
+      // Report has its own proof — use it, keep beforePhoto from stop if present
+      completionProof = {
+        beforePhoto: stopProof?.beforePhoto || null,
+        afterPhoto: reportJson.proofPhoto,
+        completedAt:
+          reportJson.proofPhotoUploadedAt || stopProof?.completedAt || null,
+      };
+    } else if (stopProof) {
+      // In-flight stop with photos but report not yet updated
+      completionProof = stopProof;
+    }
+
+    return {
+      ...reportJson,
+      completionProof,
+    };
+  });
+};
 // ============================================
 // CREATE REPORT
 // ============================================
