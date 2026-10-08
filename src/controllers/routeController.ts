@@ -16,7 +16,7 @@ import {
   getZoneForSuburb,
   isWorkingDayForZone,
   getWorkingDaysForZone,
-  // ✅ NEW: timezone-safe helpers
+  // ✅ timezone-safe helpers
   getDayOfWeekInPNG,
   getTodayInPNG,
 } from '../constants/portMoresbyZones';
@@ -294,10 +294,12 @@ export const createRoute = async (req: AuthRequest, res: Response) => {
 };
 
 // ============================================
-// GET TODAY'S ROUTE (for driver)
-// ✅ Attaches reportComments, reportPhotos,
-//    reportAdminResponse to complaint stops
+// GET TODAY'S ROUTES (for driver)
+// ✅ Returns ALL of today's routes as an array:
+//    • Collection route (if today is a collection day)
+//    • Any complaint-response routes assigned today
 // ✅ Timezone-safe: uses PNG wall-clock for day check + date range
+// ✅ Attaches reportComments/reportPhotos to complaint stops
 // ============================================
 export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
   try {
@@ -317,20 +319,8 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
     }
 
     // ✅ Check the working day using PNG wall-clock, not server-local time.
-    //    On Vercel (UTC), `new Date()` at PNG 07:00 would otherwise report
-    //    the previous day.
     const now = new Date();
-
-    if (!isWorkingDayForZone(now, truck.zone)) {
-      const dayName = getDayOfWeekInPNG(now); // e.g. 'thursday'
-      const friendlyDay =
-        dayName.charAt(0).toUpperCase() + dayName.slice(1);
-      const workingDays = getWorkingDaysForZone(truck.zone);
-      return res.status(404).json({
-        error: 'Not a collection day',
-        message: `${truck.zone} does not collect on ${friendlyDay}s. Collection days: ${workingDays.join(', ')}`,
-      });
-    }
+    const isCollectionDay = isWorkingDayForZone(now, truck.zone);
 
     // ✅ Date range for the query — PNG "today" at midnight → tomorrow at midnight
     const today = getTodayInPNG();
@@ -353,7 +343,8 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
       },
     ];
 
-    let route = await Route.findOne({
+    // ✅ Fetch ALL today's routes for this truck (collection + response).
+    const routes = await Route.findAll({
       where: {
         truckId: truck.id,
         scheduledDate: {
@@ -362,37 +353,76 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
         },
       },
       include: includeArray,
+      order: [['scheduledDate', 'ASC']],
     });
 
-    if (!route) {
+    // If there are no routes at all today, we only error if it's a
+    // non-collection day AND there are no response routes coming through
+    // (which is the same thing since routes.length === 0).
+    if (routes.length === 0) {
+      if (!isCollectionDay) {
+        const dayName = getDayOfWeekInPNG(now);
+        const friendlyDay =
+          dayName.charAt(0).toUpperCase() + dayName.slice(1);
+        const workingDays = getWorkingDaysForZone(truck.zone);
+        return res.status(404).json({
+          error: 'Not a collection day',
+          message: `${truck.zone} does not collect on ${friendlyDay}s. Collection days: ${workingDays.join(', ')}`,
+        });
+      }
+
+      // It IS a collection day but no route exists → fallback to a recent
+      // collection route (last 7 days), same as before.
       console.log(
-        `No route scheduled for today for truck ${truck.truckId}. Fetching latest route...`
+        `No route scheduled for today for truck ${truck.truckId}. Checking for recent collection route...`
       );
 
-      route = await Route.findOne({
-        where: { truckId: truck.id },
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setUTCDate(sevenDaysAgo.getUTCDate() - 7);
+
+      const fallbackRoute = await Route.findOne({
+        where: {
+          truckId: truck.id,
+          scheduledDate: { [Op.gte]: sevenDaysAgo },
+          [Op.or]: [
+            { notes: null },
+            { notes: { [Op.notLike]: 'Complaint response route%' } },
+          ],
+        },
         order: [['scheduledDate', 'DESC']],
         include: includeArray,
       });
 
-      if (!route) {
+      if (!fallbackRoute) {
         return res.status(404).json({
           error: 'No route scheduled',
           message: 'You do not have any routes scheduled',
         });
       }
+
+      routes.push(fallbackRoute);
     }
 
     // ============================================
     // ✅ Attach comments + photos + report info to complaint stops
+    //    across ALL routes
     // ============================================
-    const routeJson = route.toJSON() as any;
-    const complaintStops = (routeJson.stops || []).filter(
-      (s: any) => s.isComplaintStop && s.reportId
-    );
+    const routesJson: any[] = routes.map((r) => r.toJSON());
 
-    if (complaintStops.length > 0) {
-      const reportIds = complaintStops.map((s: any) => s.reportId);
+    // Collect every complaint reportId across all routes
+    const allComplaintStops: any[] = [];
+    routesJson.forEach((routeJson) => {
+      (routeJson.stops || []).forEach((s: any) => {
+        if (s.isComplaintStop && s.reportId) {
+          allComplaintStops.push(s);
+        }
+      });
+    });
+
+    if (allComplaintStops.length > 0) {
+      const reportIds = Array.from(
+        new Set(allComplaintStops.map((s: any) => s.reportId))
+      );
 
       // --- Fetch public comments ---
       const comments = await ReportComment.findAll({
@@ -423,7 +453,7 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
         });
       });
 
-      // --- Fetch report details (photos, description, issueType, admin response) ---
+      // --- Fetch report details ---
       const reports = await Report.findAll({
         where: { id: { [Op.in]: reportIds } },
         attributes: [
@@ -448,25 +478,33 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
         };
       });
 
-      // --- Attach everything to complaint stops ---
-      routeJson.stops = routeJson.stops.map((s: any) => {
-        if (s.isComplaintStop && s.reportId) {
-          const reportData = reportsById[s.reportId] || {};
-          return {
-            ...s,
-            reportComments: commentsByReport[s.reportId] || [],
-            reportPhotos: reportData.photos || [],
-            reportDescription: reportData.description || null,
-            reportIssueType: reportData.issueType || null,
-            reportAdminResponse: reportData.adminResponse || null,
-            reportAdminRespondedAt: reportData.adminRespondedAt || null,
-          };
-        }
-        return s;
+      // --- Attach everything to complaint stops on every route ---
+      routesJson.forEach((routeJson) => {
+        routeJson.stops = (routeJson.stops || []).map((s: any) => {
+          if (s.isComplaintStop && s.reportId) {
+            const reportData = reportsById[s.reportId] || {};
+            return {
+              ...s,
+              reportComments: commentsByReport[s.reportId] || [],
+              reportPhotos: reportData.photos || [],
+              reportDescription: reportData.description || null,
+              reportIssueType: reportData.issueType || null,
+              reportAdminResponse: reportData.adminResponse || null,
+              reportAdminRespondedAt: reportData.adminRespondedAt || null,
+            };
+          }
+          return s;
+        });
       });
     }
 
-    res.json({ route: routeJson });
+    // ✅ Return as `routes: [...]` array. Also keep a `route` alias pointing
+    //    at the first route for backwards compatibility with any code that
+    //    still reads `data.route`.
+    res.json({
+      routes: routesJson,
+      route: routesJson[0] || null,
+    });
   } catch (error: any) {
     handleError(res, error, "Failed to fetch today's route");
   }
@@ -864,13 +902,11 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
     if (stop.isComplaintStop && stop.reportId) {
       const report = await Report.findByPk(stop.reportId);
       if (report) {
-        // Persist the after photo as proof-of-service
         if (afterPhoto) {
           report.proofPhoto = afterPhoto;
           report.proofPhotoUploadedAt = new Date();
         }
 
-        // Flip status to resolved
         if (report.status !== 'resolved') {
           report.status = 'resolved' as any;
           report.resolvedAt = new Date();
@@ -1254,7 +1290,6 @@ export const createRouteFromComplaints = async (req: AuthRequest, res: Response)
     const scheduledDateObj = new Date(scheduledDate);
 
     if (!isWorkingDayForZone(scheduledDateObj, zone)) {
-      // ✅ PNG-aware day name
       const dayName = getDayOfWeekInPNG(scheduledDateObj);
       const friendlyDay =
         dayName.charAt(0).toUpperCase() + dayName.slice(1);
