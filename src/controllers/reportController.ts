@@ -1,400 +1,347 @@
 import { Request, Response } from 'express';
-import { Op, QueryTypes } from 'sequelize';
-import sequelize from '../config/database';
-import Report, { ReportStatus } from '../models/Report';
-import Truck, { TruckStatus } from '../models/Truck';
-import User, { UserRole } from '../models/User';
-import Route from '../models/Route';
+import { Op } from 'sequelize';
+import Report, { IssueType, ReportStatus, Priority } from '../models/Report';
+import User from '../models/User';
+import Truck from '../models/Truck';
+import Route, { RouteStatus } from '../models/Route';
 import RouteStop, { StopStatus } from '../models/RouteStop';
 import { AuthRequest } from '../middleware/auth';
-import { getWorkingDaysForZone } from '../constants/portMoresbyZones';
+import ReportComment from '../models/ReportComment';
+import { ZoneName } from '../constants/portMoresbyZones';
 
 // ============================================
-// HELPER: Compute week-spanning duration per truck
+// HELPER: Enrich reports with completion proof
+// ✅ Prefers Report.proofPhoto (persisted after stop deletion)
+// ✅ Falls back to an existing RouteStop for in-flight stops
 // ============================================
-interface RouteStatRow {
-  id: string;
-  zone: string;
-  suburb: string;
-  status: string;
-  truckId: string | null;
-  driverName: string | null;
-  scheduledStart: string | null;
-  scheduledEnd: string | null;
-  actualStart: string | null;
-  actualEnd: string | null;
-  total_stops: number;
-  completed_stops: number;
-}
+const enrichReportsWithCompletionProof = async (reports: any[]) => {
+  if (!reports || reports.length === 0) return reports;
 
-interface WeekDuration {
-  duration: string;
-  durationType: 'scheduled' | 'actual';
-  rawHours: number | null;
-}
+  const reportIds = reports.map((r) => r.id);
 
-const computeWeekDurations = (
-  routeStats: RouteStatRow[]
-): Record<string, WeekDuration> => {
-  const byTruck: Record<string, RouteStatRow[]> = {};
-  for (const r of routeStats) {
-    const key = r.truckId || '__unassigned__';
-    if (!byTruck[key]) byTruck[key] = [];
-    byTruck[key].push(r);
-  }
+  // Pull any still-existing complaint RouteStops (haven't been completed yet)
+  const stops = await RouteStop.findAll({
+    where: {
+      reportId: { [Op.in]: reportIds },
+      isComplaintStop: true,
+    },
+    attributes: [
+      'id',
+      'reportId',
+      'beforePhoto',
+      'afterPhoto',
+      'completedAt',
+      'status',
+    ],
+  });
 
-  const result: Record<string, WeekDuration> = {};
-
-  for (const [truckId, routes] of Object.entries(byTruck)) {
-    let weekStart: number | null = null;
-    let weekEnd: number | null = null;
-
-    for (const r of routes) {
-      if (r.actualStart) {
-        const t = new Date(r.actualStart).getTime();
-        if (!isNaN(t) && (weekStart === null || t < weekStart)) {
-          weekStart = t;
-        }
-      }
-      if (r.actualEnd) {
-        const t = new Date(r.actualEnd).getTime();
-        if (!isNaN(t) && (weekEnd === null || t > weekEnd)) {
-          weekEnd = t;
-        }
-      }
+  const stopProofByReport: Record<
+    string,
+    {
+      beforePhoto: string | null;
+      afterPhoto: string | null;
+      completedAt: Date | null;
     }
+  > = {};
 
-    if (weekStart !== null && weekEnd !== null && weekEnd >= weekStart) {
-      const hours = (weekEnd - weekStart) / (1000 * 60 * 60);
-      result[truckId] = {
-        duration: `${hours.toFixed(1)} hrs`,
-        durationType: 'actual',
-        rawHours: hours,
+  stops.forEach((stop: any) => {
+    const sj = stop.toJSON();
+    if (sj.reportId) {
+      stopProofByReport[sj.reportId] = {
+        beforePhoto: sj.beforePhoto || null,
+        afterPhoto: sj.afterPhoto || null,
+        completedAt: sj.completedAt || null,
       };
-      continue;
     }
+  });
 
-    const SCHEDULED_HOURS_PER_WEEK = 8 * 3;
-    result[truckId] = {
-      duration: `${SCHEDULED_HOURS_PER_WEEK.toFixed(1)} hrs`,
-      durationType: 'scheduled',
-      rawHours: SCHEDULED_HOURS_PER_WEEK,
-    };
-  }
+  return reports.map((r) => {
+    const reportJson = r.toJSON ? r.toJSON() : r;
 
-  return result;
-};
+    // ✅ Prefer the report's own persisted proof photo
+    const hasReportProof = !!reportJson.proofPhoto;
+    const stopProof = stopProofByReport[reportJson.id] || null;
 
-// ============================================
-// HELPER: Format route rows with week duration
-// ============================================
-const formatRoutes = (routeStats: RouteStatRow[]) => {
-  const weekDurations = computeWeekDurations(routeStats);
+    let completionProof:
+      | {
+          beforePhoto: string | null;
+          afterPhoto: string | null;
+          completedAt: Date | null;
+        }
+      | null = null;
 
-  return routeStats.map((r) => {
-    const totalStops = r.total_stops || 0;
-    const completedStops = r.completed_stops || 0;
-
-    const week = weekDurations[r.truckId || '__unassigned__'] || {
-      duration: '0 hrs',
-      durationType: 'scheduled' as const,
-      rawHours: null,
-    };
-
-    const efficiency =
-      totalStops > 0 ? Math.round((completedStops / totalStops) * 100) : 0;
+    if (hasReportProof) {
+      // Report has its own proof — use it, keep beforePhoto from stop if present
+      completionProof = {
+        beforePhoto: stopProof?.beforePhoto || null,
+        afterPhoto: reportJson.proofPhoto,
+        completedAt:
+          reportJson.proofPhotoUploadedAt || stopProof?.completedAt || null,
+      };
+    } else if (stopProof) {
+      // In-flight stop with photos but report not yet updated
+      completionProof = stopProof;
+    }
 
     return {
-      id: r.id,
-      route: `${r.zone} - ${r.suburb}`,
-      driver: r.driverName || 'Unassigned',
-      truckId: r.truckId || 'N/A',
-      duration: week.duration,
-      durationType: week.durationType,
-      rawDuration: week.rawHours,
-      stops: totalStops,
-      completed: completedStops,
-      efficiency,
-      status: r.status,
+      ...reportJson,
+      completionProof,
     };
   });
 };
 
 // ============================================
-// HELPER: Compute stats from formatted routes
+// CREATE REPORT
 // ============================================
-const computeStats = (
-  formattedRoutes: ReturnType<typeof formatRoutes>
-) => {
-  const totalRoutes = formattedRoutes.length;
-  const completedRoutes = formattedRoutes.filter(
-    (r) => r.status === 'completed'
-  ).length;
-  const avgEfficiency =
-    totalRoutes > 0
-      ? Math.round(
-          formattedRoutes.reduce((sum, r) => sum + r.efficiency, 0) /
-            totalRoutes
-        )
-      : 0;
-
-  const uniqueTruckDurations = new Map<string, number>();
-  for (const r of formattedRoutes) {
-    if (
-      r.durationType === 'actual' &&
-      typeof r.rawDuration === 'number' &&
-      !uniqueTruckDurations.has(r.truckId)
-    ) {
-      uniqueTruckDurations.set(r.truckId, r.rawDuration);
+export const createReport = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
     }
+
+    const {
+      issueType,
+      description,
+      address,
+      zone,
+      latitude,
+      longitude,
+      photos,
+      contactName,
+      contactPhone,
+      contactEmail,
+    } = req.body;
+
+    if (!issueType || !description || !address) {
+      return res.status(400).json({
+        error: 'Missing required fields',
+        message: 'issueType, description, and address are required',
+      });
+    }
+
+    const allowedIssueTypes = Object.values(IssueType);
+    if (!allowedIssueTypes.includes(issueType)) {
+      return res.status(400).json({
+        error: 'Invalid issue type',
+        message: `issueType must be one of: ${allowedIssueTypes.join(', ')}`,
+      });
+    }
+
+    // ✅ Photos required EXCEPT for emergency alerts
+    const isEmergencyAlert = description?.startsWith('[🚨 DRIVER EMERGENCY]');
+
+    if (
+      !isEmergencyAlert &&
+      (!photos || !Array.isArray(photos) || photos.length === 0)
+    ) {
+      return res.status(400).json({
+        error: 'Photos required',
+        message:
+          'At least one photo is required as evidence of the issue. Please attach a photo and try again.',
+      });
+    }
+
+    let priority: Priority = Priority.MEDIUM;
+    if (issueType === IssueType.ILLEGAL_DUMPING) {
+      priority = Priority.HIGH;
+    } else if (issueType === IssueType.OVERFLOWING_BIN) {
+      priority = Priority.MEDIUM;
+    } else if (issueType === IssueType.MISSED_COLLECTION) {
+      priority = Priority.MEDIUM;
+    }
+
+    const report = await Report.create({
+      citizenId: req.user.id,
+      issueType,
+      description,
+      address,
+      zone: zone || null,
+      latitude: latitude || null,
+      longitude: longitude || null,
+      photos: photos || [],
+      status: ReportStatus.PENDING,
+      priority,
+      contactName: contactName || null,
+      contactPhone: contactPhone || null,
+      contactEmail: contactEmail || null,
+    });
+
+    res.status(201).json({
+      message: 'Report submitted successfully',
+      report,
+    });
+  } catch (error: any) {
+    console.error('Create report error:', error);
+    res.status(500).json({
+      error: 'Failed to create report',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
+    });
   }
-
-  const avgDuration =
-    uniqueTruckDurations.size > 0
-      ? Array.from(uniqueTruckDurations.values()).reduce((a, b) => a + b, 0) /
-        uniqueTruckDurations.size
-      : 0;
-
-  return {
-    totalRoutes,
-    completedRoutes,
-    avgEfficiency,
-    avgDuration: Math.round(avgDuration * 10) / 10,
-  };
 };
 
 // ============================================
-// GET DASHBOARD DATA (COMBINED)
-// GET /api/kpis/dashboard
+// GET MY REPORTS (Citizen view)
+// ✅ Shows ALL reports including archived ones
 // ============================================
-export const getDashboardData = async (req: AuthRequest, res: Response) => {
+export const getMyReports = async (req: AuthRequest, res: Response) => {
   try {
-    const overallStart = Date.now();
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
 
-    const [kpisResult, fleetResult, routesResult] = await Promise.all([
-      // ---- KPIs ----
-      (async () => {
-        const start = Date.now();
+    const reports = await Report.findAll({
+      where: { citizenId: req.user.id },
+      order: [['createdAt', 'DESC']],
+    });
 
-        const [reportStats, truckStats, userCounts, fleetCompletion] =
-          await Promise.all([
-            sequelize.query(
-              `
-              SELECT
-                COUNT(*)::int AS total_reports,
-                COUNT(CASE WHEN status = 'resolved' THEN 1 END)::int AS resolved_reports,
-                COUNT(CASE WHEN status = 'pending' THEN 1 END)::int AS pending_reports,
-                COUNT(CASE WHEN status = 'in-progress' THEN 1 END)::int AS in_progress_reports
-              FROM reports
-              WHERE archived = false
-              `,
-              { type: QueryTypes.SELECT }
-            ),
-            sequelize.query(
-              `
-              WITH truck_completion AS (
-                SELECT
-                  t.id,
-                  t.status,
-                  CASE
-                    WHEN COUNT(st.id) = 0 THEN 0
-                    ELSE ROUND(
-                      COUNT(CASE WHEN st.status = 'completed' THEN 1 END)::numeric
-                      / COUNT(st.id)::numeric * 100
-                    )
-                  END AS truck_pct
-                FROM trucks t
-                LEFT JOIN routes r ON r."truckId" = t.id
-                LEFT JOIN route_stops st ON st."routeId" = r.id
-                GROUP BY t.id, t.status
-              )
-              SELECT
-                COUNT(*)::int AS total_trucks,
-                COUNT(CASE WHEN status = 'on-route' THEN 1 END)::int AS active_trucks,
-                COUNT(CASE WHEN status = 'available' THEN 1 END)::int AS available_trucks,
-                COALESCE(AVG(truck_pct), 0)::int AS avg_truck_completion
-              FROM truck_completion
-              `,
-              { type: QueryTypes.SELECT }
-            ),
-            sequelize.query(
-              `
-              SELECT
-                COUNT(CASE WHEN role = 'citizen' AND deleted = false THEN 1 END)::int AS total_citizens,
-                COUNT(CASE WHEN role = 'driver' AND deleted = false THEN 1 END)::int AS total_drivers
-              FROM users
-              `,
-              { type: QueryTypes.SELECT }
-            ),
-            sequelize.query(
-              `
-              SELECT
-                CASE
-                  WHEN COUNT(st.id) = 0 THEN 0
-                  ELSE ROUND(
-                    COUNT(CASE WHEN st.status = 'completed' THEN 1 END)::numeric
-                    / COUNT(st.id)::numeric * 100
-                  )
-                END::int AS completion_rate
-              FROM route_stops st
-              `,
-              { type: QueryTypes.SELECT }
-            ),
-          ]);
+    const reportIds = reports.map((r) => r.id);
 
-        const rs = (reportStats as any[])[0] || {};
-        const ts = (truckStats as any[])[0] || {};
-        const uc = (userCounts as any[])[0] || {};
-        const fc = (fleetCompletion as any[])[0] || {};
+    let commentsByReport: Record<string, any[]> = {};
 
-        const result = {
-          completionRate: fc.completion_rate || 0,
-          fuelEfficiency: 92,
-          punctuality: 78,
-          citizenSatisfaction: 84,
-          totalReports: rs.total_reports || 0,
-          resolvedReports: rs.resolved_reports || 0,
-          pendingReports: rs.pending_reports || 0,
-          inProgressReports: rs.in_progress_reports || 0,
-          totalCollections: rs.resolved_reports || 0,
-          totalTrucks: ts.total_trucks || 0,
-          activeTrucks: ts.active_trucks || 0,
-          availableTrucks: ts.available_trucks || 0,
-          totalCitizens: uc.total_citizens || 0,
-          totalDrivers: uc.total_drivers || 0,
-          avgTruckCompletion: ts.avg_truck_completion || 0,
-        };
+    if (reportIds.length > 0) {
+      const comments = await ReportComment.findAll({
+        where: {
+          reportId: { [Op.in]: reportIds },
+          isInternal: false,
+        },
+        include: [
+          {
+            model: User,
+            as: 'author',
+            attributes: ['id', 'name', 'role'],
+          },
+        ],
+        order: [['createdAt', 'ASC']],
+      });
 
-        console.log(`⏱️ [dashboard] KPIs: ${Date.now() - start}ms`);
-        return result;
-      })(),
+      commentsByReport = comments.reduce((acc: any, comment: any) => {
+        const c = comment.toJSON();
+        if (!acc[c.reportId]) acc[c.reportId] = [];
+        acc[c.reportId].push({
+          id: c.id,
+          content: c.content,
+          createdAt: c.createdAt,
+          authorName: c.author?.name || 'Admin',
+          authorRole: c.author?.role || 'admin',
+        });
+        return acc;
+      }, {});
+    }
 
-      // ---- FLEET STATUS ----
-      (async () => {
-        const start = Date.now();
+    const reportsWithComments = reports.map((r) => ({
+      ...r.toJSON(),
+      adminComments: commentsByReport[r.id] || [],
+    }));
 
-        const trucksWithCounts: any[] = await sequelize.query(
-          `
-          SELECT
-            t.id,
-            t."truckId",
-            t."registrationNumber",
-            t.zone,
-            t.status,
-            t."truckType",
-            t.capacity,
-            t."lastUpdate",
-            t."driverId",
-            u.name  AS "driverName",
-            u.email AS "driverEmail",
-            COALESCE(rs.total_stops, 0)::int AS "totalStops",
-            COALESCE(rs.completed_stops, 0)::int AS "completedStops"
-          FROM trucks t
-          LEFT JOIN users u ON u.id = t."driverId"
-          LEFT JOIN (
-            SELECT
-              r."truckId",
-              COUNT(st.id)::int AS total_stops,
-              COUNT(CASE WHEN st.status = 'completed' THEN 1 END)::int AS completed_stops
-            FROM routes r
-            LEFT JOIN route_stops st ON st."routeId" = r.id
-            GROUP BY r."truckId"
-          ) rs ON rs."truckId" = t.id
-          ORDER BY t."truckId" ASC
-          `,
-          { type: QueryTypes.SELECT }
-        );
+    const enriched = await enrichReportsWithCompletionProof(
+      reportsWithComments
+    );
 
-        const result = trucksWithCounts.map((row) => {
-          const totalStops = row.totalStops || 0;
-          const completedStops = row.completedStops || 0;
+    res.json({
+      count: enriched.length,
+      reports: enriched,
+    });
+  } catch (error: any) {
+    console.error('Get my reports error:', error);
+    res.status(500).json({
+      error: 'Failed to fetch reports',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
+    });
+  }
+};
 
-          const realCompletion =
-            totalStops > 0
-              ? Math.round((completedStops / totalStops) * 100)
-              : 0;
+// ============================================
+// GET ALL REPORTS (Admin view)
+// ✅ Hides archived reports from the Admin Complaint tab
+// ============================================
+export const getAllReports = async (req: AuthRequest, res: Response) => {
+  try {
+    const {
+      status,
+      priority,
+      issueType,
+      zone,
+      limit = '50',
+      offset = '0',
+    } = req.query;
 
-          return {
-            id: row.id,
-            truckId: row.truckId,
-            registrationNumber: row.registrationNumber,
-            driver: row.driverId
-              ? {
-                  id: row.driverId,
-                  name: row.driverName,
-                  email: row.driverEmail,
-                }
-              : null,
-            driverName: row.driverName || 'Unassigned',
-            zone: row.zone,
-            status: row.status,
-            truckType: row.truckType || 'collection',
-            completion: realCompletion,
-            totalStops,
-            completedStops,
-            capacity: row.capacity,
-            workingDays: getWorkingDaysForZone(row.zone),
-            lastUpdate: row.lastUpdate,
-          };
+    // ✅ Filter out archived reports by default
+    const where: any = { archived: false };
+    if (status) where.status = status;
+    if (priority) where.priority = priority;
+    if (issueType) where.issueType = issueType;
+    if (zone) where.zone = zone;
+
+    const { count, rows: reports } = await Report.findAndCountAll({
+      where,
+      include: [
+        {
+          model: User,
+          as: 'citizen',
+          attributes: ['id', 'name', 'email', 'phone'],
+        },
+      ],
+      order: [['createdAt', 'DESC']],
+      limit: parseInt(limit as string),
+      offset: parseInt(offset as string),
+    });
+
+    const enrichedReports = await Promise.all(
+      reports.map(async (report) => {
+        const reportJson = report.toJSON();
+
+        const stop = await RouteStop.findOne({
+          where: { reportId: report.id },
+          include: [
+            {
+              model: Route,
+              as: 'route',
+              include: [
+                {
+                  model: Truck,
+                  as: 'truck',
+                  attributes: ['id', 'truckId'],
+                  include: [
+                    {
+                      model: User,
+                      as: 'driver',
+                      attributes: ['id', 'name'],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
         });
 
-        console.log(`⏱️ [dashboard] Fleet: ${Date.now() - start}ms`);
-        return result;
-      })(),
+        const stopJson = stop ? (stop.toJSON() as any) : null;
 
-      // ---- ROUTE PERFORMANCE ----
-      // ✅ Excludes complaint-response routes (tagged in `notes`)
-      (async () => {
-        const start = Date.now();
+        return {
+          ...reportJson,
+          assignedTruck: stopJson?.route?.truck?.truckId || null,
+          assignedDriver: stopJson?.route?.truck?.driver?.name || null,
+        };
+      })
+    );
 
-        const routeStats: any[] = await sequelize.query(
-          `
-          SELECT
-            r.id,
-            r.zone,
-            r.suburb,
-            r.status,
-            r."scheduledStart",
-            r."scheduledEnd",
-            r."actualStart",
-            r."actualEnd",
-            t."truckId",
-            u.name AS "driverName",
-            COALESCE(COUNT(st.id), 0)::int AS total_stops,
-            COALESCE(COUNT(CASE WHEN st.status = 'completed' THEN 1 END), 0)::int AS completed_stops
-          FROM routes r
-          LEFT JOIN trucks t ON t.id = r."truckId"
-          LEFT JOIN users u ON u.id = t."driverId"
-          LEFT JOIN route_stops st ON st."routeId" = r.id
-          WHERE r.notes IS NULL OR r.notes NOT LIKE 'Complaint response route%'
-          GROUP BY r.id, t."truckId", u.name
-          ORDER BY r."scheduledDate" DESC
-          `,
-          { type: QueryTypes.SELECT }
-        );
-
-        const formattedRoutes = formatRoutes(routeStats as RouteStatRow[]);
-        const stats = computeStats(formattedRoutes);
-
-        console.log(`⏱️ [dashboard] Routes: ${Date.now() - start}ms`);
-        return { routes: formattedRoutes, stats };
-      })(),
-    ]);
-
-    const totalTime = Date.now() - overallStart;
-    console.log(`⏱️ [dashboard] TOTAL: ${totalTime}ms`);
+    const withProof = await enrichReportsWithCompletionProof(enrichedReports);
 
     res.json({
-      kpis: kpisResult,
-      fleet: fleetResult,
-      routes: routesResult.routes,
-      stats: routesResult.stats,
-      fetchedAt: new Date().toISOString(),
+      total: count,
+      limit: parseInt(limit as string),
+      offset: parseInt(offset as string),
+      reports: withProof,
     });
   } catch (error: any) {
-    console.error('Get dashboard data error:', error);
+    console.error('Get all reports error:', error);
     res.status(500).json({
-      error: 'Failed to fetch dashboard data',
+      error: 'Failed to fetch reports',
       message:
         process.env.NODE_ENV === 'development'
           ? error.message
@@ -404,105 +351,260 @@ export const getDashboardData = async (req: AuthRequest, res: Response) => {
 };
 
 // ============================================
-// GET KPI OVERVIEW
-// GET /api/kpis
+// GET REPORT BY ID
 // ============================================
-export const getKPIs = async (req: AuthRequest, res: Response) => {
+export const getReportById = async (req: AuthRequest, res: Response) => {
   try {
-    const [reportStats, truckStats, userCounts, fleetCompletion] =
-      await Promise.all([
-        sequelize.query(
-          `
-          SELECT
-            COUNT(*)::int AS total_reports,
-            COUNT(CASE WHEN status = 'resolved' THEN 1 END)::int AS resolved_reports,
-            COUNT(CASE WHEN status = 'pending' THEN 1 END)::int AS pending_reports,
-            COUNT(CASE WHEN status = 'in-progress' THEN 1 END)::int AS in_progress_reports
-          FROM reports
-          WHERE archived = false
-          `,
-          { type: QueryTypes.SELECT }
-        ),
-        sequelize.query(
-          `
-          WITH truck_completion AS (
-            SELECT
-              t.id,
-              t.status,
-              CASE
-                WHEN COUNT(st.id) = 0 THEN 0
-                ELSE ROUND(
-                  COUNT(CASE WHEN st.status = 'completed' THEN 1 END)::numeric
-                  / COUNT(st.id)::numeric * 100
-                )
-              END AS truck_pct
-            FROM trucks t
-            LEFT JOIN routes r ON r."truckId" = t.id
-            LEFT JOIN route_stops st ON st."routeId" = r.id
-            GROUP BY t.id, t.status
-          )
-          SELECT
-            COUNT(*)::int AS total_trucks,
-            COUNT(CASE WHEN status = 'on-route' THEN 1 END)::int AS active_trucks,
-            COUNT(CASE WHEN status = 'available' THEN 1 END)::int AS available_trucks,
-            COALESCE(AVG(truck_pct), 0)::int AS avg_truck_completion
-          FROM truck_completion
-          `,
-          { type: QueryTypes.SELECT }
-        ),
-        sequelize.query(
-          `
-          SELECT
-            COUNT(CASE WHEN role = 'citizen' AND deleted = false THEN 1 END)::int AS total_citizens,
-            COUNT(CASE WHEN role = 'driver' AND deleted = false THEN 1 END)::int AS total_drivers
-          FROM users
-          `,
-          { type: QueryTypes.SELECT }
-        ),
-        sequelize.query(
-          `
-          SELECT
-            CASE
-              WHEN COUNT(st.id) = 0 THEN 0
-              ELSE ROUND(
-                COUNT(CASE WHEN st.status = 'completed' THEN 1 END)::numeric
-                / COUNT(st.id)::numeric * 100
-              )
-            END::int AS completion_rate
-          FROM route_stops st
-          `,
-          { type: QueryTypes.SELECT }
-        ),
-      ]);
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
 
-    const rs = (reportStats as any[])[0] || {};
-    const ts = (truckStats as any[])[0] || {};
-    const uc = (userCounts as any[])[0] || {};
-    const fc = (fleetCompletion as any[])[0] || {};
+    const report = await Report.findByPk(req.params.id, {
+      include: [
+        {
+          model: User,
+          as: 'citizen',
+          attributes: ['id', 'name', 'email', 'phone'],
+        },
+      ],
+    });
 
-    const kpis = {
-      completionRate: fc.completion_rate || 0,
-      fuelEfficiency: 92,
-      punctuality: 78,
-      citizenSatisfaction: 84,
-      totalReports: rs.total_reports || 0,
-      resolvedReports: rs.resolved_reports || 0,
-      pendingReports: rs.pending_reports || 0,
-      inProgressReports: rs.in_progress_reports || 0,
-      totalCollections: rs.resolved_reports || 0,
-      totalTrucks: ts.total_trucks || 0,
-      activeTrucks: ts.active_trucks || 0,
-      availableTrucks: ts.available_trucks || 0,
-      totalCitizens: uc.total_citizens || 0,
-      totalDrivers: uc.total_drivers || 0,
-      avgTruckCompletion: ts.avg_truck_completion || 0,
+    if (!report) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    const isAuthor = report.citizenId === req.user.id;
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'management';
+    const isAssignedDriver =
+      req.user.role === 'driver' && report.assignedTo === req.user.id;
+
+    if (!isAuthor && !isAdmin && !isAssignedDriver) {
+      return res.status(403).json({
+        error: 'Access denied',
+        message: 'You do not have access to this report',
+      });
+    }
+
+    const reportJson = report.toJSON() as any;
+
+    // Strip adminResponse if viewer is not author or admin
+    if (!isAuthor && !isAdmin) {
+      delete reportJson.adminResponse;
+      delete reportJson.adminRespondedAt;
+      delete reportJson.adminRespondedBy;
+    }
+
+    const [withProof] = await enrichReportsWithCompletionProof([reportJson]);
+
+    res.json({ report: withProof });
+  } catch (error: any) {
+    console.error('Get report by id error:', error);
+    res.status(500).json({
+      error: 'Failed to fetch report',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
+    });
+  }
+};
+
+// ============================================
+// UPDATE REPORT STATUS
+// ============================================
+export const updateReportStatus = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    const { status, assignedTo } = req.body;
+
+    if (!status) {
+      return res.status(400).json({
+        error: 'Missing status',
+        message: 'status is required',
+      });
+    }
+
+    const allowedStatuses = Object.values(ReportStatus);
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        error: 'Invalid status',
+        message: `status must be one of: ${allowedStatuses.join(', ')}`,
+      });
+    }
+
+    const report = await Report.findByPk(req.params.id);
+    if (!report) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    report.status = status;
+    if (assignedTo !== undefined) {
+      report.assignedTo = assignedTo || null;
+    }
+    if (status === ReportStatus.RESOLVED) {
+      report.resolvedAt = new Date();
+    }
+
+    await report.save();
+
+    res.json({
+      message: 'Report status updated successfully',
+      report,
+    });
+  } catch (error: any) {
+    console.error('Update report status error:', error);
+    res.status(500).json({
+      error: 'Failed to update report',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
+    });
+  }
+};
+
+// ============================================
+// UPDATE REPORT
+// ============================================
+export const updateReport = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    const report = await Report.findByPk(req.params.id);
+    if (!report) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    const isOwner = report.citizenId === req.user.id;
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'management';
+
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({
+        error: 'Access denied',
+        message: 'You can only update your own reports',
+      });
+    }
+
+    if (isOwner && !isAdmin && report.status !== ReportStatus.PENDING) {
+      return res.status(403).json({
+        error: 'Cannot update',
+        message: 'You can only update reports that are still pending',
+      });
+    }
+
+    const {
+      description,
+      address,
+      latitude,
+      longitude,
+      photos,
+      issueType,
+      zone,
+    } = req.body;
+
+    if (description !== undefined) report.description = description;
+    if (address !== undefined) report.address = address;
+    if (zone !== undefined) report.zone = zone;
+    if (latitude !== undefined) report.latitude = latitude;
+    if (longitude !== undefined) report.longitude = longitude;
+    if (photos !== undefined) report.photos = photos;
+    if (issueType !== undefined) report.issueType = issueType;
+
+    await report.save();
+
+    res.json({ message: 'Report updated successfully', report });
+  } catch (error: any) {
+    console.error('Update report error:', error);
+    res.status(500).json({
+      error: 'Failed to update report',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
+    });
+  }
+};
+
+// ============================================
+// DELETE REPORT
+// ============================================
+export const deleteReport = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    const report = await Report.findByPk(req.params.id);
+    if (!report) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    const isOwner = report.citizenId === req.user.id;
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'management';
+
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({
+        error: 'Access denied',
+        message: 'You can only delete your own reports',
+      });
+    }
+
+    if (isOwner && !isAdmin && report.status !== ReportStatus.PENDING) {
+      return res.status(403).json({
+        error: 'Cannot delete',
+        message: 'You can only delete reports that are still pending',
+      });
+    }
+
+    await report.destroy();
+    res.json({ message: 'Report deleted successfully' });
+  } catch (error: any) {
+    console.error('Delete report error:', error);
+    res.status(500).json({
+      error: 'Failed to delete report',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
+    });
+  }
+};
+
+// ============================================
+// GET REPORT STATS
+// ============================================
+export const getReportStats = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    const reports = await Report.findAll({
+      where: { citizenId: req.user.id },
+      attributes: ['status'],
+    });
+
+    const stats = {
+      total: reports.length,
+      pending: reports.filter((r) => r.status === ReportStatus.PENDING).length,
+      inProgress: reports.filter((r) => r.status === ReportStatus.IN_PROGRESS)
+        .length,
+      resolved: reports.filter((r) => r.status === ReportStatus.RESOLVED)
+        .length,
+      rejected: reports.filter((r) => r.status === ReportStatus.REJECTED)
+        .length,
     };
 
-    res.json({ kpis });
+    res.json({ stats });
   } catch (error: any) {
-    console.error('Get KPIs error:', error);
+    console.error('Get report stats error:', error);
     res.status(500).json({
-      error: 'Failed to fetch KPIs',
+      error: 'Failed to fetch stats',
       message:
         process.env.NODE_ENV === 'development'
           ? error.message
@@ -512,81 +614,28 @@ export const getKPIs = async (req: AuthRequest, res: Response) => {
 };
 
 // ============================================
-// GET FLEET STATUS
-// GET /api/kpis/fleet
+// GET REPORT COUNTS
 // ============================================
-export const getFleetStatus = async (req: AuthRequest, res: Response) => {
+export const getReportCounts = async (req: AuthRequest, res: Response) => {
   try {
-    const trucksWithCounts: any[] = await sequelize.query(
-      `
-      SELECT
-        t.id,
-        t."truckId",
-        t."registrationNumber",
-        t.zone,
-        t.status,
-        t."truckType",
-        t.capacity,
-        t."lastUpdate",
-        t."driverId",
-        u.name  AS "driverName",
-        u.email AS "driverEmail",
-        COALESCE(rs.total_stops, 0)::int AS "totalStops",
-        COALESCE(rs.completed_stops, 0)::int AS "completedStops"
-      FROM trucks t
-      LEFT JOIN users u ON u.id = t."driverId"
-      LEFT JOIN (
-        SELECT
-          r."truckId",
-          COUNT(st.id)::int AS total_stops,
-          COUNT(CASE WHEN st.status = 'completed' THEN 1 END)::int AS completed_stops
-        FROM routes r
-        LEFT JOIN route_stops st ON st."routeId" = r.id
-        GROUP BY r."truckId"
-      ) rs ON rs."truckId" = t.id
-      ORDER BY t."truckId" ASC
-      `,
-      { type: QueryTypes.SELECT }
-    );
+    const reports = await Report.findAll({ attributes: ['status'] });
 
-    const fleet = trucksWithCounts.map((row) => {
-      const totalStops = row.totalStops || 0;
-      const completedStops = row.completedStops || 0;
+    const counts = {
+      total: reports.length,
+      pending: reports.filter((r) => r.status === ReportStatus.PENDING).length,
+      inProgress: reports.filter((r) => r.status === ReportStatus.IN_PROGRESS)
+        .length,
+      resolved: reports.filter((r) => r.status === ReportStatus.RESOLVED)
+        .length,
+      rejected: reports.filter((r) => r.status === ReportStatus.REJECTED)
+        .length,
+    };
 
-      const realCompletion =
-        totalStops > 0
-          ? Math.round((completedStops / totalStops) * 100)
-          : 0;
-
-      return {
-        id: row.id,
-        truckId: row.truckId,
-        registrationNumber: row.registrationNumber,
-        driver: row.driverId
-          ? {
-              id: row.driverId,
-              name: row.driverName,
-              email: row.driverEmail,
-            }
-          : null,
-        driverName: row.driverName || 'Unassigned',
-        zone: row.zone,
-        status: row.status,
-        truckType: row.truckType || 'collection',
-        completion: realCompletion,
-        totalStops,
-        completedStops,
-        capacity: row.capacity,
-        workingDays: getWorkingDaysForZone(row.zone),
-        lastUpdate: row.lastUpdate,
-      };
-    });
-
-    res.json({ fleet });
+    res.json({ counts });
   } catch (error: any) {
-    console.error('Get fleet status error:', error);
+    console.error('Get report counts error:', error);
     res.status(500).json({
-      error: 'Failed to fetch fleet',
+      error: 'Failed to fetch counts',
       message:
         process.env.NODE_ENV === 'development'
           ? error.message
@@ -596,46 +645,30 @@ export const getFleetStatus = async (req: AuthRequest, res: Response) => {
 };
 
 // ============================================
-// GET ROUTE PERFORMANCE
-// GET /api/kpis/routes
-// ✅ Excludes complaint-response routes (tagged in `notes`)
+// GET REPORTS BY CITIZEN
 // ============================================
-export const getRoutePerformance = async (req: AuthRequest, res: Response) => {
+export const getReportsByCitizen = async (req: AuthRequest, res: Response) => {
   try {
-    const routeStats: any[] = await sequelize.query(
-      `
-      SELECT
-        r.id,
-        r.zone,
-        r.suburb,
-        r.status,
-        r."scheduledStart",
-        r."scheduledEnd",
-        r."actualStart",
-        r."actualEnd",
-        t."truckId",
-        u.name AS "driverName",
-        COALESCE(COUNT(st.id), 0)::int AS total_stops,
-        COALESCE(COUNT(CASE WHEN st.status = 'completed' THEN 1 END), 0)::int AS completed_stops
-      FROM routes r
-      LEFT JOIN trucks t ON t.id = r."truckId"
-      LEFT JOIN users u ON u.id = t."driverId"
-      LEFT JOIN route_stops st ON st."routeId" = r.id
-      WHERE r.notes IS NULL OR r.notes NOT LIKE 'Complaint response route%'
-      GROUP BY r.id, t."truckId", u.name
-      ORDER BY r."scheduledDate" DESC
-      `,
-      { type: QueryTypes.SELECT }
-    );
+    const { citizenId } = req.params;
 
-    const formattedRoutes = formatRoutes(routeStats as RouteStatRow[]);
-    const stats = computeStats(formattedRoutes);
+    const citizen = await User.findByPk(citizenId, {
+      attributes: ['id', 'name', 'email', 'phone'],
+    });
 
-    res.json({ routes: formattedRoutes, stats });
+    if (!citizen) {
+      return res.status(404).json({ error: 'Citizen not found' });
+    }
+
+    const reports = await Report.findAll({
+      where: { citizenId },
+      order: [['createdAt', 'DESC']],
+    });
+
+    res.json({ citizen, count: reports.length, reports });
   } catch (error: any) {
-    console.error('Get route performance error:', error);
+    console.error('Get reports by citizen error:', error);
     res.status(500).json({
-      error: 'Failed to fetch route performance',
+      error: 'Failed to fetch reports',
       message:
         process.env.NODE_ENV === 'development'
           ? error.message
@@ -645,155 +678,361 @@ export const getRoutePerformance = async (req: AuthRequest, res: Response) => {
 };
 
 // ============================================
-// RESET CURRENT WEEK STATE
-// POST /api/kpis/reset-week
-// Requires: admin/management
-//
-// ✅ NEW step 0: Purges phantom complaint stops that were merged into
-//    fixed collection routes by the old assignTruckToComplaint logic.
-//    Response routes (tagged in `notes`) are preserved.
+// GET COMMENTS
 // ============================================
-export const resetWeekData = async (req: AuthRequest, res: Response) => {
+export const getReportComments = async (req: AuthRequest, res: Response) => {
   try {
-    console.log('🔄 Resetting all routes + stops for a fresh week...');
-
-    // ✅ STEP 0: Purge phantom complaint stops.
-    //    Any complaint stop sitting on a route that is NOT a response
-    //    route (i.e. `notes` does not start with 'Complaint response route')
-    //    is a leftover from the old merge behavior. Delete it.
-    const purgeResult: unknown = await sequelize.query(
-      `
-      DELETE FROM route_stops rs
-      USING routes r
-      WHERE rs."routeId" = r.id
-        AND rs."isComplaintStop" = true
-        AND (r.notes IS NULL OR r.notes NOT LIKE 'Complaint response route%')
-      `,
-      { type: QueryTypes.DELETE }
-    );
-
-    let purgedStops = 0;
-    if (Array.isArray(purgeResult) && typeof purgeResult[1] === 'number') {
-      purgedStops = purgeResult[1];
-    } else if (typeof purgeResult === 'number') {
-      purgedStops = purgeResult;
-    }
-    console.log(`🧹 Purged ${purgedStops} phantom complaint stop(s)`);
-
-    // 1. Reset all remaining stops back to pending
-    const stopResult: unknown = await sequelize.query(
-      `
-      UPDATE route_stops
-      SET
-        status = 'pending',
-        "completedAt" = NULL,
-        "skippedReason" = NULL,
-        "beforePhoto" = NULL,
-        "afterPhoto" = NULL,
-        notes = NULL
-      `,
-      { type: QueryTypes.UPDATE }
-    );
-    let resetStops = 0;
-    if (Array.isArray(stopResult) && typeof stopResult[1] === 'number') {
-      resetStops = stopResult[1];
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
     }
 
-    // 2. Reset all routes back to pending
-    const routeResult: unknown = await sequelize.query(
-      `
-      UPDATE routes
-      SET
-        status = 'pending',
-        "completedStops" = 0,
-        "actualStart" = NULL,
-        "actualEnd" = NULL
-      `,
-      { type: QueryTypes.UPDATE }
-    );
-    let resetRoutes = 0;
-    if (Array.isArray(routeResult) && typeof routeResult[1] === 'number') {
-      resetRoutes = routeResult[1];
+    const report = await Report.findByPk(req.params.id);
+    if (!report) {
+      return res.status(404).json({ error: 'Report not found' });
     }
 
-    // 3. Recalculate totalStops + completedStops on all routes to keep
-    //    progress bars accurate after the phantom purge.
-    await sequelize.query(
-      `
-      UPDATE routes r
-      SET
-        "totalStops" = COALESCE(sub.total, 0),
-        "completedStops" = COALESCE(sub.completed, 0)
-      FROM (
-        SELECT
-          r2.id,
-          COUNT(rs.id) AS total,
-          COUNT(CASE WHEN rs.status = 'completed' THEN 1 END) AS completed
-        FROM routes r2
-        LEFT JOIN route_stops rs ON rs."routeId" = r2.id
-        GROUP BY r2.id
-      ) sub
-      WHERE r.id = sub.id
-      `,
-      { type: QueryTypes.UPDATE }
-    );
+    const isOwner = report.citizenId === req.user.id;
 
-    // 4. Reset all trucks (completion = 0, status = available)
-    const truckResult: unknown = await sequelize.query(
-      `
-      UPDATE trucks
-      SET
-        completion = 0,
-        status = CASE
-          WHEN status IN ('maintenance', 'offline') THEN status
-          ELSE 'available'
-        END,
-        "lastUpdate" = NOW()
-      `,
-      { type: QueryTypes.UPDATE }
-    );
-    let resetTrucks = 0;
-    if (Array.isArray(truckResult) && typeof truckResult[1] === 'number') {
-      resetTrucks = truckResult[1];
+    if (req.user.role === 'citizen' && !isOwner) {
+      return res.status(403).json({
+        error: 'Access denied',
+        message: 'You can only view comments on your own reports',
+      });
     }
 
-    // 5. Archive complaint records from this week (do NOT delete)
-    const complaintResult: unknown = await sequelize.query(
-      `
-      UPDATE reports
-      SET archived = true
-      WHERE "createdAt" >= NOW() - INTERVAL '7 days'
-        AND archived = false
-      `,
-      { type: QueryTypes.UPDATE }
-    );
-    let archivedComplaints = 0;
-    if (
-      Array.isArray(complaintResult) &&
-      typeof complaintResult[1] === 'number'
-    ) {
-      archivedComplaints = complaintResult[1];
+    const where: any = { reportId: req.params.id };
+    if (req.user.role === 'citizen') {
+      where.isInternal = false;
     }
 
-    console.log(
-      `✅ Reset complete: ${purgedStops} purged, ${resetStops} stops, ${resetRoutes} routes, ${resetTrucks} trucks, ${archivedComplaints} complaints archived`
-    );
+    const comments = await ReportComment.findAll({
+      where,
+      include: [
+        {
+          model: User,
+          as: 'author',
+          attributes: ['id', 'name', 'email', 'role'],
+        },
+      ],
+      order: [['createdAt', 'ASC']],
+    });
+
+    res.json({ count: comments.length, comments });
+  } catch (error: any) {
+    console.error('Get report comments error:', error);
+    res.status(500).json({
+      error: 'Failed to fetch comments',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
+    });
+  }
+};
+
+// ============================================
+// ADD COMMENT
+// ============================================
+export const addReportComment = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    const { content, isInternal } = req.body;
+
+    if (!content || !content.trim()) {
+      return res.status(400).json({
+        error: 'Missing content',
+        message: 'Comment content is required',
+      });
+    }
+
+    const report = await Report.findByPk(req.params.id);
+    if (!report) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'management';
+    const isDriver = req.user.role === 'driver';
+    const isOwner = report.citizenId === req.user.id;
+
+    if (req.user.role === 'citizen' && !isOwner) {
+      return res.status(403).json({
+        error: 'Access denied',
+        message: 'You can only comment on your own reports',
+      });
+    }
+
+    const allowInternal = isAdmin || isDriver;
+    const commentIsInternal = allowInternal && isInternal === true;
+
+    const comment = await ReportComment.create({
+      reportId: req.params.id,
+      userId: req.user.id,
+      content: content.trim(),
+      isInternal: commentIsInternal,
+    });
+
+    const commentWithAuthor = await ReportComment.findByPk(comment.id, {
+      include: [
+        {
+          model: User,
+          as: 'author',
+          attributes: ['id', 'name', 'email', 'role'],
+        },
+      ],
+    });
+
+    res.status(201).json({
+      message: 'Comment added successfully',
+      comment: commentWithAuthor,
+    });
+  } catch (error: any) {
+    console.error('Add report comment error:', error);
+    res.status(500).json({
+      error: 'Failed to add comment',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
+    });
+  }
+};
+
+// ============================================
+// DELETE COMMENT
+// ============================================
+export const deleteReportComment = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    const comment = await ReportComment.findByPk(req.params.commentId);
+    if (!comment) {
+      return res.status(404).json({ error: 'Comment not found' });
+    }
+
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'management';
+    const isAuthor = comment.userId === req.user.id;
+
+    if (!isAuthor && !isAdmin) {
+      return res.status(403).json({
+        error: 'Access denied',
+        message: 'You can only delete your own comments',
+      });
+    }
+
+    await comment.destroy();
+    res.json({ message: 'Comment deleted successfully' });
+  } catch (error: any) {
+    console.error('Delete report comment error:', error);
+    res.status(500).json({
+      error: 'Failed to delete comment',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
+    });
+  }
+};
+
+// ============================================
+// ASSIGN TRUCK TO COMPLAINT
+// ✅ NEVER merges into an existing collection route.
+//    Always creates a standalone "complaint response route" so the
+//    assigned driver's fixed schedule stays clean (no phantom stops).
+// ============================================
+export const assignTruckToComplaint = async (
+  req: AuthRequest,
+  res: Response
+) => {
+  try {
+    const { id } = req.params;
+    const { truckId } = req.body;
+
+    if (!truckId) {
+      return res.status(400).json({
+        error: 'Missing truck ID',
+        message: 'truckId is required',
+      });
+    }
+
+    const report = await Report.findByPk(id);
+    if (!report) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    if (report.status === ReportStatus.RESOLVED) {
+      return res.status(400).json({
+        error: 'Already resolved',
+        message: 'This complaint has already been resolved',
+      });
+    }
+
+    const truck = await Truck.findByPk(truckId, {
+      include: [{ model: User, as: 'driver' }],
+    });
+    if (!truck) {
+      return res.status(404).json({ error: 'Truck not found' });
+    }
+
+    // ✅ Always create a NEW dedicated route for the complaint.
+    const start = new Date();
+    start.setHours(8, 0, 0, 0);
+    const end = new Date();
+    end.setHours(16, 0, 0, 0);
+
+    const zoneToUse: ZoneName =
+      (report.zone as ZoneName) || (truck.zone as ZoneName);
+
+    const route = await Route.create({
+      truckId: truck.id,
+      zone: zoneToUse,
+      suburb: report.address.split(',')[1]?.trim() || truck.zone,
+      scheduledDate: new Date(),
+      scheduledStart: start,
+      scheduledEnd: end,
+      estimatedDuration: 480,
+      status: RouteStatus.PENDING,
+      totalStops: 1,
+      completedStops: 0,
+      // ✅ Tagged in notes so the admin dashboard can filter it out
+      notes: `Complaint response route — ${report.issueType}`,
+    });
+
+    const stop = await RouteStop.create({
+      routeId: route.id,
+      sequence: 1,
+      address: report.address,
+      suburb: report.zone || truck.zone,
+      latitude: report.latitude
+        ? parseFloat(report.latitude.toString())
+        : -9.4438,
+      longitude: report.longitude
+        ? parseFloat(report.longitude.toString())
+        : 147.1803,
+      status: StopStatus.PENDING,
+      isComplaintStop: true,
+      complaintType: report.issueType as any,
+      reportId: report.id,
+    });
+
+    // Update the report to reflect the assignment
+    report.status = ReportStatus.IN_PROGRESS;
+    if (truck.driverId) {
+      report.assignedTo = truck.driverId;
+    }
+    await report.save();
 
     res.json({
-      message: 'Week has been reset successfully',
-      resetAt: new Date().toISOString(),
-      reset: {
-        purgedPhantomStops: purgedStops,
-        stops: resetStops,
-        routes: resetRoutes,
-        trucks: resetTrucks,
-        complaints: archivedComplaints,
-      },
+      message: 'Truck assigned successfully',
+      route,
+      stop,
+      report,
     });
   } catch (error: any) {
-    console.error('Reset week error:', error);
+    console.error('Assign truck error:', error);
     res.status(500).json({
-      error: 'Failed to reset week data',
+      error: 'Failed to assign truck',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
+    });
+  }
+};
+
+// ============================================
+// ADMIN RESPONDS TO REPORT / EMERGENCY ALERT
+// POST /api/reports/:id/respond
+// ============================================
+export const respondToReport = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    const { response } = req.body;
+
+    if (!response || !response.trim()) {
+      return res.status(400).json({
+        error: 'Missing response',
+        message: 'A response message is required',
+      });
+    }
+
+    const report = await Report.findByPk(req.params.id);
+    if (!report) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    report.adminResponse = response.trim();
+    report.adminRespondedAt = new Date();
+    report.adminRespondedBy = req.user.id;
+
+    if (report.status === ReportStatus.PENDING) {
+      report.status = ReportStatus.IN_PROGRESS;
+    }
+
+    await report.save();
+
+    res.json({
+      message: 'Response sent successfully',
+      report,
+    });
+  } catch (error: any) {
+    console.error('Respond to report error:', error);
+    res.status(500).json({
+      error: 'Failed to send response',
+      message:
+        process.env.NODE_ENV === 'development'
+          ? error.message
+          : 'Something went wrong',
+    });
+  }
+};
+
+// ============================================
+// GET MY EMERGENCY RESPONSES (for driver)
+// GET /api/reports/my-emergency-responses
+// ============================================
+export const getMyEmergencyResponses = async (
+  req: AuthRequest,
+  res: Response
+) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+
+    const reports = await Report.findAll({
+      where: {
+        citizenId: req.user.id,
+        description: { [Op.like]: '[🚨 DRIVER EMERGENCY]%' },
+        adminResponse: { [Op.not]: null },
+        status: { [Op.notIn]: [ReportStatus.RESOLVED, ReportStatus.REJECTED] },
+      },
+      order: [['adminRespondedAt', 'DESC']],
+      limit: 10,
+    });
+
+    res.json({
+      count: reports.length,
+      responses: reports.map((r) => ({
+        id: r.id,
+        emergencyType: r.description,
+        adminResponse: r.adminResponse,
+        respondedAt: r.adminRespondedAt,
+        createdAt: r.createdAt,
+        status: r.status,
+      })),
+    });
+  } catch (error: any) {
+    console.error('Get my emergency responses error:', error);
+    res.status(500).json({
+      error: 'Failed to fetch responses',
       message:
         process.env.NODE_ENV === 'development'
           ? error.message
