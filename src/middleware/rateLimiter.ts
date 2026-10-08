@@ -6,13 +6,15 @@ import rateLimit from 'express-rate-limit';
 // ============================================
 export const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 300, // 300 requests per 15 minutes per IP
+  max: 500, // ✅ Increased from 300 → 500 requests per 15 minutes per IP
   message: {
     error: 'Too many requests',
     message: 'Too many requests from this IP. Please try again later.',
   },
   standardHeaders: true, // Return rate limit info in headers
   legacyHeaders: false, // Disable older X-RateLimit-* headers
+  // ✅ Skip the limiter entirely in development so testing isn't hindered
+  skip: () => process.env.NODE_ENV === 'development',
 });
 
 // ============================================

@@ -29,7 +29,8 @@ import scheduleRoutes from './routes/scheduleRoutes';
 import routeRoutes from './routes/routeRoutes';
 import uploadRoutes from './routes/uploadRoutes';
 import userRoutes from './routes/userRoutes';
-import { apiLimiter } from './middleware/rateLimiter';
+// ✅ Import both limiters — general + strict auth
+import { apiLimiter, authLimiter } from './middleware/rateLimiter';
 
 dotenv.config();
 
@@ -68,7 +69,14 @@ app.use((req, res, next) => {
 // ============================================
 // ROUTES
 // ============================================
+
+// ✅ General limiter for most API routes
 app.use('/api', apiLimiter);
+
+// ✅ Stricter limiter for auth endpoints (protect against brute-force)
+//    Must be registered BEFORE authRoutes so it runs first.
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
 
 app.use('/api/auth', authRoutes);
 app.use('/api/reports', reportRoutes);
