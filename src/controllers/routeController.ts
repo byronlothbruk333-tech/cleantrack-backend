@@ -291,7 +291,8 @@ export const createRoute = async (req: AuthRequest, res: Response) => {
 
 // ============================================
 // GET TODAY'S ROUTE (for driver)
-// ✅ IMPROVEMENT 3: Attaches reportComments AND reportPhotos to complaint stops
+// ✅ Attaches reportComments, reportPhotos,
+//    reportAdminResponse to complaint stops
 // ============================================
 export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
   try {
@@ -371,7 +372,9 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // ✅ Attach comments + photos to complaint stops
+    // ============================================
+    // ✅ Attach comments + photos + report info to complaint stops
+    // ============================================
     const routeJson = route.toJSON() as any;
     const complaintStops = (routeJson.stops || []).filter(
       (s: any) => s.isComplaintStop && s.reportId
@@ -380,7 +383,7 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
     if (complaintStops.length > 0) {
       const reportIds = complaintStops.map((s: any) => s.reportId);
 
-      // Fetch public comments
+      // --- Fetch public comments ---
       const comments = await ReportComment.findAll({
         where: {
           reportId: { [Op.in]: reportIds },
@@ -396,7 +399,6 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
         order: [['createdAt', 'ASC']],
       });
 
-      // Group comments by reportId
       const commentsByReport: Record<string, any[]> = {};
       comments.forEach((c: any) => {
         const cj = c.toJSON();
@@ -410,10 +412,17 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
         });
       });
 
-      // ✅ Fetch photos + adminResponse from linked reports
+      // --- Fetch report details (photos, description, issueType, admin response) ---
       const reports = await Report.findAll({
         where: { id: { [Op.in]: reportIds } },
-        attributes: ['id', 'photos', 'adminResponse', 'adminRespondedAt'],
+        attributes: [
+          'id',
+          'photos',
+          'description',
+          'issueType',
+          'adminResponse',
+          'adminRespondedAt',
+        ],
       });
 
       const reportsById: Record<string, any> = {};
@@ -421,12 +430,14 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
         const rj = r.toJSON();
         reportsById[rj.id] = {
           photos: rj.photos || [],
+          description: rj.description || null,
+          issueType: rj.issueType || null,
           adminResponse: rj.adminResponse || null,
           adminRespondedAt: rj.adminRespondedAt || null,
         };
       });
 
-      // Attach everything to complaint stops
+      // --- Attach everything to complaint stops ---
       routeJson.stops = routeJson.stops.map((s: any) => {
         if (s.isComplaintStop && s.reportId) {
           const reportData = reportsById[s.reportId] || {};
@@ -434,6 +445,8 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
             ...s,
             reportComments: commentsByReport[s.reportId] || [],
             reportPhotos: reportData.photos || [],
+            reportDescription: reportData.description || null,
+            reportIssueType: reportData.issueType || null,
             reportAdminResponse: reportData.adminResponse || null,
             reportAdminRespondedAt: reportData.adminRespondedAt || null,
           };
@@ -827,7 +840,7 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
 
     await updateTruckStatusFromRoute(route.id, completedCount, handledCount);
 
-    // ✅ IMPROVEMENT 4 + #4: Handle complaint stop completion + removal
+    // Handle complaint stop completion + removal
     if (stop.isComplaintStop && stop.reportId) {
       const report = await Report.findByPk(stop.reportId);
       if (report && report.status !== 'resolved') {
