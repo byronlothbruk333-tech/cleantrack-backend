@@ -10,6 +10,182 @@ import { AuthRequest } from '../middleware/auth';
 import { getWorkingDaysForZone } from '../constants/portMoresbyZones';
 
 // ============================================
+// HELPER: Compute week-spanning duration per truck
+//
+// Rule (per your spec):
+//   • Timer STARTS the moment a driver completes the FIRST
+//     stop of the week (day 1).
+//   • Timer STOPS the moment a driver completes the LAST
+//     stop of the week (day 3).
+//
+// The controller already receives per-route actualStart/actualEnd
+// values from routeController.completeStop. We group by truck and
+// take MIN(actualStart) and MAX(actualEnd) across the truck's
+// routes for the week.
+// ============================================
+interface RouteStatRow {
+  id: string;
+  zone: string;
+  suburb: string;
+  status: string;
+  truckId: string | null;
+  driverName: string | null;
+  scheduledStart: string | null;
+  scheduledEnd: string | null;
+  actualStart: string | null;
+  actualEnd: string | null;
+  total_stops: number;
+  completed_stops: number;
+}
+
+interface WeekDuration {
+  duration: string;
+  durationType: 'scheduled' | 'actual';
+  rawHours: number | null;
+}
+
+const computeWeekDurations = (
+  routeStats: RouteStatRow[]
+): Record<string, WeekDuration> => {
+  // Group routes by truckId
+  const byTruck: Record<string, RouteStatRow[]> = {};
+  for (const r of routeStats) {
+    const key = r.truckId || '__unassigned__';
+    if (!byTruck[key]) byTruck[key] = [];
+    byTruck[key].push(r);
+  }
+
+  const result: Record<string, WeekDuration> = {};
+
+  for (const [truckId, routes] of Object.entries(byTruck)) {
+    // Find the earliest actualStart and latest actualEnd across all
+    // routes for this truck.
+    let weekStart: number | null = null;
+    let weekEnd: number | null = null;
+
+    for (const r of routes) {
+      if (r.actualStart) {
+        const t = new Date(r.actualStart).getTime();
+        if (!isNaN(t) && (weekStart === null || t < weekStart)) {
+          weekStart = t;
+        }
+      }
+      if (r.actualEnd) {
+        const t = new Date(r.actualEnd).getTime();
+        if (!isNaN(t) && (weekEnd === null || t > weekEnd)) {
+          weekEnd = t;
+        }
+      }
+    }
+
+    // If both ends exist and weekEnd >= weekStart → real measured duration
+    if (weekStart !== null && weekEnd !== null && weekEnd >= weekStart) {
+      const hours = (weekEnd - weekStart) / (1000 * 60 * 60);
+      result[truckId] = {
+        duration: `${hours.toFixed(1)} hrs`,
+        durationType: 'actual',
+        rawHours: hours,
+      };
+      continue;
+    }
+
+    // Otherwise fall back to scheduled duration (8 hrs per day × 3 days)
+    // This is what the admin sees before a driver has completed any stop.
+    const SCHEDULED_HOURS_PER_WEEK = 8 * 3; // 24 hrs
+    result[truckId] = {
+      duration: `${SCHEDULED_HOURS_PER_WEEK.toFixed(1)} hrs`,
+      durationType: 'scheduled',
+      rawHours: SCHEDULED_HOURS_PER_WEEK,
+    };
+  }
+
+  return result;
+};
+
+// ============================================
+// HELPER: Format route rows with week duration
+// ============================================
+const formatRoutes = (routeStats: RouteStatRow[]) => {
+  const weekDurations = computeWeekDurations(routeStats);
+
+  return routeStats.map((r) => {
+    const totalStops = r.total_stops || 0;
+    const completedStops = r.completed_stops || 0;
+
+    // Every route belonging to the same truck shows the SAME week
+    // duration. This is the total time between the driver's very first
+    // stop completion on day 1 and their very last stop completion on day 3.
+    const week = weekDurations[r.truckId || '__unassigned__'] || {
+      duration: '0 hrs',
+      durationType: 'scheduled' as const,
+      rawHours: null,
+    };
+
+    const efficiency =
+      totalStops > 0 ? Math.round((completedStops / totalStops) * 100) : 0;
+
+    return {
+      id: r.id,
+      route: `${r.zone} - ${r.suburb}`,
+      driver: r.driverName || 'Unassigned',
+      truckId: r.truckId || 'N/A',
+      duration: week.duration,
+      durationType: week.durationType,
+      rawDuration: week.rawHours,
+      stops: totalStops,
+      completed: completedStops,
+      efficiency,
+      status: r.status,
+    };
+  });
+};
+
+// ============================================
+// HELPER: Compute stats from formatted routes
+// ============================================
+const computeStats = (
+  formattedRoutes: ReturnType<typeof formatRoutes>
+) => {
+  const totalRoutes = formattedRoutes.length;
+  const completedRoutes = formattedRoutes.filter(
+    (r) => r.status === 'completed'
+  ).length;
+  const avgEfficiency =
+    totalRoutes > 0
+      ? Math.round(
+          formattedRoutes.reduce((sum, r) => sum + r.efficiency, 0) /
+            totalRoutes
+        )
+      : 0;
+
+  // Average the week duration ACROSS UNIQUE TRUCKS, not across rows.
+  // (Otherwise a truck with 3 rows would be counted 3 times.)
+  const uniqueTruckDurations = new Map<string, number>();
+  for (const r of formattedRoutes) {
+    if (
+      r.durationType === 'actual' &&
+      typeof r.rawDuration === 'number' &&
+      !uniqueTruckDurations.has(r.truckId)
+    ) {
+      uniqueTruckDurations.set(r.truckId, r.rawDuration);
+    }
+  }
+
+  const avgDuration =
+    uniqueTruckDurations.size > 0
+      ? Array.from(uniqueTruckDurations.values()).reduce((a, b) => a + b, 0) /
+        uniqueTruckDurations.size
+      : 0;
+
+  return {
+    totalRoutes,
+    completedRoutes,
+    avgEfficiency,
+    avgDuration: Math.round(avgDuration * 10) / 10,
+  };
+};
+
+// ============================================
 // GET DASHBOARD DATA (COMBINED)
 // GET /api/kpis/dashboard
 // ============================================
@@ -217,81 +393,11 @@ export const getDashboardData = async (req: AuthRequest, res: Response) => {
           { type: QueryTypes.SELECT }
         );
 
-        const formattedRoutes = routeStats.map((r) => {
-          const totalStops = r.total_stops || 0;
-          const completedStops = r.completed_stops || 0;
-
-          let duration = '0 hrs';
-          let durationType: 'scheduled' | 'actual' = 'scheduled';
-
-          if (r.actualStart && r.actualEnd) {
-            const startTime = new Date(r.actualStart).getTime();
-            const endTime = new Date(r.actualEnd).getTime();
-            const diffHours = (endTime - startTime) / (1000 * 60 * 60);
-            duration = `${diffHours.toFixed(1)} hrs`;
-            durationType = 'actual';
-          } else if (r.scheduledStart && r.scheduledEnd) {
-            const startTime = new Date(r.scheduledStart).getTime();
-            const endTime = new Date(r.scheduledEnd).getTime();
-            const diffHours = (endTime - startTime) / (1000 * 60 * 60);
-            duration = `${diffHours.toFixed(1)} hrs`;
-          }
-
-          const efficiency =
-            totalStops > 0
-              ? Math.round((completedStops / totalStops) * 100)
-              : 0;
-
-          return {
-            id: r.id,
-            route: `${r.zone} - ${r.suburb}`,
-            driver: r.driverName || 'Unassigned',
-            truckId: r.truckId || 'N/A',
-            duration,
-            durationType,
-            stops: totalStops,
-            completed: completedStops,
-            efficiency,
-            status: r.status,
-          };
-        });
-
-        const totalRoutes = formattedRoutes.length;
-        const completedRoutes = formattedRoutes.filter(
-          (r) => r.status === 'completed'
-        ).length;
-        const avgEfficiency =
-          totalRoutes > 0
-            ? Math.round(
-                formattedRoutes.reduce((sum, r) => sum + r.efficiency, 0) /
-                  totalRoutes
-              )
-            : 0;
-
-        const routesWithActualDuration = formattedRoutes.filter(
-          (r) => r.durationType === 'actual'
-        );
-
-        const avgDuration =
-          routesWithActualDuration.length > 0
-            ? routesWithActualDuration.reduce(
-                (sum, r) => sum + parseFloat(r.duration),
-                0
-              ) / routesWithActualDuration.length
-            : 0;
-
-        const result = {
-          routes: formattedRoutes,
-          stats: {
-            totalRoutes,
-            completedRoutes,
-            avgEfficiency,
-            avgDuration: Math.round(avgDuration * 10) / 10,
-          },
-        };
+        const formattedRoutes = formatRoutes(routeStats as RouteStatRow[]);
+        const stats = computeStats(formattedRoutes);
 
         console.log(`⏱️ [dashboard] Routes: ${Date.now() - start}ms`);
-        return result;
+        return { routes: formattedRoutes, stats };
       })(),
     ]);
 
@@ -540,76 +646,10 @@ export const getRoutePerformance = async (req: AuthRequest, res: Response) => {
       { type: QueryTypes.SELECT }
     );
 
-    const formattedRoutes = routeStats.map((r) => {
-      const totalStops = r.total_stops || 0;
-      const completedStops = r.completed_stops || 0;
+    const formattedRoutes = formatRoutes(routeStats as RouteStatRow[]);
+    const stats = computeStats(formattedRoutes);
 
-      let duration = '0 hrs';
-      let durationType: 'scheduled' | 'actual' = 'scheduled';
-
-      if (r.actualStart && r.actualEnd) {
-        const startTime = new Date(r.actualStart).getTime();
-        const endTime = new Date(r.actualEnd).getTime();
-        const diffHours = (endTime - startTime) / (1000 * 60 * 60);
-        duration = `${diffHours.toFixed(1)} hrs`;
-        durationType = 'actual';
-      } else if (r.scheduledStart && r.scheduledEnd) {
-        const startTime = new Date(r.scheduledStart).getTime();
-        const endTime = new Date(r.scheduledEnd).getTime();
-        const diffHours = (endTime - startTime) / (1000 * 60 * 60);
-        duration = `${diffHours.toFixed(1)} hrs`;
-      }
-
-      const efficiency =
-        totalStops > 0 ? Math.round((completedStops / totalStops) * 100) : 0;
-
-      return {
-        id: r.id,
-        route: `${r.zone} - ${r.suburb}`,
-        driver: r.driverName || 'Unassigned',
-        truckId: r.truckId || 'N/A',
-        duration,
-        durationType,
-        stops: totalStops,
-        completed: completedStops,
-        efficiency,
-        status: r.status,
-      };
-    });
-
-    const totalRoutes = formattedRoutes.length;
-    const completedRoutes = formattedRoutes.filter(
-      (r) => r.status === 'completed'
-    ).length;
-    const avgEfficiency =
-      totalRoutes > 0
-        ? Math.round(
-            formattedRoutes.reduce((sum, r) => sum + r.efficiency, 0) /
-              totalRoutes
-          )
-        : 0;
-
-    const routesWithActualDuration = formattedRoutes.filter(
-      (r) => r.durationType === 'actual'
-    );
-
-    const avgDuration =
-      routesWithActualDuration.length > 0
-        ? routesWithActualDuration.reduce(
-            (sum, r) => sum + parseFloat(r.duration),
-            0
-          ) / routesWithActualDuration.length
-        : 0;
-
-    res.json({
-      routes: formattedRoutes,
-      stats: {
-        totalRoutes,
-        completedRoutes,
-        avgEfficiency,
-        avgDuration: Math.round(avgDuration * 10) / 10,
-      },
-    });
+    res.json({ routes: formattedRoutes, stats });
   } catch (error: any) {
     console.error('Get route performance error:', error);
     res.status(500).json({
