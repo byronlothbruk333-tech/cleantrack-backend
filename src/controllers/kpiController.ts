@@ -365,6 +365,9 @@ export const getDashboardData = async (req: AuthRequest, res: Response) => {
       })(),
 
       // ---- ROUTE PERFORMANCE ----
+      // ✅ Excludes complaint-response routes (tagged in `notes`).
+      //    Those are created by reportController.assignTruckToComplaint
+      //    and should not appear as scheduled collection routes.
       (async () => {
         const start = Date.now();
 
@@ -387,6 +390,7 @@ export const getDashboardData = async (req: AuthRequest, res: Response) => {
           LEFT JOIN trucks t ON t.id = r."truckId"
           LEFT JOIN users u ON u.id = t."driverId"
           LEFT JOIN route_stops st ON st."routeId" = r.id
+          WHERE r.notes IS NULL OR r.notes NOT LIKE 'Complaint response route%'
           GROUP BY r.id, t."truckId", u.name
           ORDER BY r."scheduledDate" DESC
           `,
@@ -618,6 +622,7 @@ export const getFleetStatus = async (req: AuthRequest, res: Response) => {
 // ============================================
 // GET ROUTE PERFORMANCE
 // GET /api/kpis/routes
+// ✅ Excludes complaint-response routes (tagged in `notes`)
 // ============================================
 export const getRoutePerformance = async (req: AuthRequest, res: Response) => {
   try {
@@ -640,6 +645,7 @@ export const getRoutePerformance = async (req: AuthRequest, res: Response) => {
       LEFT JOIN trucks t ON t.id = r."truckId"
       LEFT JOIN users u ON u.id = t."driverId"
       LEFT JOIN route_stops st ON st."routeId" = r.id
+      WHERE r.notes IS NULL OR r.notes NOT LIKE 'Complaint response route%'
       GROUP BY r.id, t."truckId", u.name
       ORDER BY r."scheduledDate" DESC
       `,

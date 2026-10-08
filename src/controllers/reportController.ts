@@ -89,6 +89,7 @@ const enrichReportsWithCompletionProof = async (reports: any[]) => {
     };
   });
 };
+
 // ============================================
 // CREATE REPORT
 // ============================================
@@ -839,6 +840,9 @@ export const deleteReportComment = async (req: AuthRequest, res: Response) => {
 
 // ============================================
 // ASSIGN TRUCK TO COMPLAINT
+// ✅ NEVER merges into an existing collection route.
+//    Always creates a standalone "complaint response route" so the
+//    assigned driver's fixed schedule stays clean (no phantom stops).
 // ============================================
 export const assignTruckToComplaint = async (
   req: AuthRequest,
@@ -874,47 +878,38 @@ export const assignTruckToComplaint = async (
       return res.status(404).json({ error: 'Truck not found' });
     }
 
-    let route = await Route.findOne({
-      where: {
-        truckId: truck.id,
-        status: { [Op.in]: [RouteStatus.PENDING, RouteStatus.IN_PROGRESS] },
-      },
-      order: [['scheduledDate', 'DESC']],
+    // ✅ Always create a NEW dedicated route for the complaint.
+    //    Never look up an existing pending route — that was merging
+    //    complaint stops into fixed collection routes and leaving
+    //    phantom stops on the driver's schedule.
+    const start = new Date();
+    start.setHours(8, 0, 0, 0);
+    const end = new Date();
+    end.setHours(16, 0, 0, 0);
+
+    const zoneToUse: ZoneName =
+      (report.zone as ZoneName) || (truck.zone as ZoneName);
+
+    const route = await Route.create({
+      truckId: truck.id,
+      zone: zoneToUse,
+      suburb: report.address.split(',')[1]?.trim() || truck.zone,
+      scheduledDate: new Date(),
+      scheduledStart: start,
+      scheduledEnd: end,
+      estimatedDuration: 480,
+      status: RouteStatus.PENDING,
+      totalStops: 1,
+      completedStops: 0,
+      // ✅ Tagged in notes so the admin dashboard's "Route Performance"
+      //    table can filter it out — this is a response route, not a
+      //    scheduled collection route.
+      notes: `Complaint response route — ${report.issueType}`,
     });
-
-    if (!route) {
-      const start = new Date();
-      start.setHours(8, 0, 0, 0);
-      const end = new Date();
-      end.setHours(16, 0, 0, 0);
-
-      const zoneToUse: ZoneName =
-        (report.zone as ZoneName) || (truck.zone as ZoneName);
-
-      route = await Route.create({
-        truckId: truck.id,
-        zone: zoneToUse,
-        suburb: report.address.split(',')[1]?.trim() || truck.zone,
-        scheduledDate: new Date(),
-        scheduledStart: start,
-        scheduledEnd: end,
-        estimatedDuration: 480,
-        status: RouteStatus.PENDING,
-        totalStops: 0,
-        completedStops: 0,
-        notes: `Complaint route for ${report.issueType}`,
-      });
-    }
-
-    const maxSeq = (await RouteStop.max('sequence', {
-      where: { routeId: route.id },
-    })) as number | null;
-
-    const nextSeq = (maxSeq || 0) + 1;
 
     const stop = await RouteStop.create({
       routeId: route.id,
-      sequence: nextSeq,
+      sequence: 1,
       address: report.address,
       suburb: report.zone || truck.zone,
       latitude: report.latitude
@@ -929,9 +924,7 @@ export const assignTruckToComplaint = async (
       reportId: report.id,
     });
 
-    route.totalStops += 1;
-    await route.save();
-
+    // Update the report to reflect the assignment
     report.status = ReportStatus.IN_PROGRESS;
     if (truck.driverId) {
       report.assignedTo = truck.driverId;
