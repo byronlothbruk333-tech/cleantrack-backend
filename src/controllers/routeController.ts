@@ -781,11 +781,15 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    // ============================================
+    // VALIDATION: Complaint stops require an after photo only
+    // ============================================
     if (stop.isComplaintStop) {
-      if (!beforePhoto || !afterPhoto) {
+      if (!afterPhoto) {
         return res.status(400).json({
-          error: 'Photos required',
-          message: 'Complaint stops require both before and after photos',
+          error: 'After photo required',
+          message:
+            'Complaint stops require an "after" photo as proof of service',
         });
       }
     }
