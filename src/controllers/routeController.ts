@@ -880,6 +880,8 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
       return res.json({
         message: 'Complaint stop completed and removed from route',
         stop: null,
+        // ✅ Signal to the frontend that the stop was removed from the route
+        stopRemoved: true,
         routeProgress: {
           completedStops: route.completedStops,
           totalStops: route.totalStops,
@@ -897,6 +899,8 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
     res.json({
       message: 'Stop completed successfully',
       stop: updatedStop,
+      // ✅ Explicitly signal that the stop was NOT removed
+      stopRemoved: false,
       routeProgress: {
         completedStops: route.completedStops,
         totalStops: route.totalStops,
