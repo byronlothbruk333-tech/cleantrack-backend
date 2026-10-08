@@ -16,6 +16,9 @@ import {
   getZoneForSuburb,
   isWorkingDayForZone,
   getWorkingDaysForZone,
+  // ✅ NEW: timezone-safe helpers
+  getDayOfWeekInPNG,
+  getTodayInPNG,
 } from '../constants/portMoresbyZones';
 
 // ============================================
@@ -176,13 +179,14 @@ export const createRoute = async (req: AuthRequest, res: Response) => {
     const scheduledDateObj = new Date(scheduledDate);
 
     if (!isWorkingDayForZone(scheduledDateObj, zone)) {
-      const dayName = scheduledDateObj.toLocaleDateString('en-US', {
-        weekday: 'long',
-      });
+      // ✅ Use PNG day name for the message
+      const dayName = getDayOfWeekInPNG(scheduledDateObj);
+      const friendlyDay =
+        dayName.charAt(0).toUpperCase() + dayName.slice(1);
       const workingDays = getWorkingDaysForZone(zone);
       return res.status(400).json({
         error: 'Not a collection day',
-        message: `${zone} does not collect on ${dayName}s. Collection days: ${workingDays.join(', ')}`,
+        message: `${zone} does not collect on ${friendlyDay}s. Collection days: ${workingDays.join(', ')}`,
       });
     }
 
@@ -293,6 +297,7 @@ export const createRoute = async (req: AuthRequest, res: Response) => {
 // GET TODAY'S ROUTE (for driver)
 // ✅ Attaches reportComments, reportPhotos,
 //    reportAdminResponse to complaint stops
+// ✅ Timezone-safe: uses PNG wall-clock for day check + date range
 // ============================================
 export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
   try {
@@ -311,20 +316,26 @@ export const getTodaysRoute = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const today = new Date();
+    // ✅ Check the working day using PNG wall-clock, not server-local time.
+    //    On Vercel (UTC), `new Date()` at PNG 07:00 would otherwise report
+    //    the previous day.
+    const now = new Date();
 
-    if (!isWorkingDayForZone(today, truck.zone)) {
-      const dayName = today.toLocaleDateString('en-US', { weekday: 'long' });
+    if (!isWorkingDayForZone(now, truck.zone)) {
+      const dayName = getDayOfWeekInPNG(now); // e.g. 'thursday'
+      const friendlyDay =
+        dayName.charAt(0).toUpperCase() + dayName.slice(1);
       const workingDays = getWorkingDaysForZone(truck.zone);
       return res.status(404).json({
         error: 'Not a collection day',
-        message: `${truck.zone} does not collect on ${dayName}s. Collection days: ${workingDays.join(', ')}`,
+        message: `${truck.zone} does not collect on ${friendlyDay}s. Collection days: ${workingDays.join(', ')}`,
       });
     }
 
-    today.setHours(0, 0, 0, 0);
+    // ✅ Date range for the query — PNG "today" at midnight → tomorrow at midnight
+    const today = getTodayInPNG();
     const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
 
     const includeArray: any[] = [
       {
@@ -846,7 +857,7 @@ export const completeStop = async (req: AuthRequest, res: Response) => {
 
     // ============================================
     // Handle complaint stop completion + removal
-    // ✅ NEW: persist the proof photo onto the Report
+    // ✅ Persist the proof photo onto the Report
     //    BEFORE destroying the RouteStop, so admin +
     //    citizen can still see it after the stop is gone.
     // ============================================
@@ -1243,13 +1254,14 @@ export const createRouteFromComplaints = async (req: AuthRequest, res: Response)
     const scheduledDateObj = new Date(scheduledDate);
 
     if (!isWorkingDayForZone(scheduledDateObj, zone)) {
-      const dayName = scheduledDateObj.toLocaleDateString('en-US', {
-        weekday: 'long',
-      });
+      // ✅ PNG-aware day name
+      const dayName = getDayOfWeekInPNG(scheduledDateObj);
+      const friendlyDay =
+        dayName.charAt(0).toUpperCase() + dayName.slice(1);
       const workingDays = getWorkingDaysForZone(zone);
       return res.status(400).json({
         error: 'Not a collection day',
-        message: `${zone} does not collect on ${dayName}s. Collection days: ${workingDays.join(', ')}`,
+        message: `${zone} does not collect on ${friendlyDay}s. Collection days: ${workingDays.join(', ')}`,
       });
     }
 
